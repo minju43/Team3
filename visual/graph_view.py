@@ -85,3 +85,47 @@ class GraphVisualizer:
         ax.axis('off')
         
         return fig
+    def draw_partitioned_graph(self, partition_bitstring: str):
+        """
+        [T20-3] Max-Cut 2분할 결과(비트스트링)를 받아 노드를 A/B 그룹으로 나누어 하이라이트하는 메서드
+        """
+        G = nx.Graph()
+        G.add_nodes_from(range(self.num_nodes))
+        
+        for edge in self.edges:
+            G.add_edge(edge['source'], edge['target'], weight=edge.get('weight', 1.0))
+            
+        # 노드 위치 고정 (동일한 형태 유지)
+        pos = nx.spring_layout(G, seed=42) 
+        
+        # 비트스트링 값(0 또는 1)에 따라 노드 색상 그룹 분류
+        node_colors = []
+        for i in range(self.num_nodes):
+            # 비트스트링 인덱스가 '1'이면 파란색(B그룹), '0'이면 붉은색(A그룹)
+            if i < len(partition_bitstring) and partition_bitstring[i] == '1':
+                node_colors.append('royalblue')
+            else:
+                node_colors.append('tomato')
+                
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # 노드 렌더링 (A/B 그룹 색상 적용)
+        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=700, ax=ax)
+        
+        # 가독성을 위해 노드 번호 색상을 흰색으로 변경
+        nx.draw_networkx_labels(G, pos, font_family="sans-serif", font_color="white", ax=ax)
+        
+        # 엣지 렌더링 (노드 그룹 구분을 강조하기 위해 선 색상은 회색으로 통일)
+        weights = [G[u][v]['weight'] for u, v in G.edges()]
+        nx.draw_networkx_edges(
+            G, pos, 
+            width=[w * 1.5 for w in weights], 
+            edge_color='gray',          
+            alpha=0.5,
+            ax=ax
+        )
+        
+        ax.set_title(f"Max-Cut Partition Highlight (Result: {partition_bitstring})")
+        ax.axis('off')
+        
+        return fig
