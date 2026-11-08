@@ -1,5 +1,7 @@
 # visual/graph_view.py
 import json
+import networkx as nx
+import matplotlib.pyplot as plt
 from typing import Dict, Any, List
 
 class GraphVisualizer:
@@ -47,3 +49,39 @@ class GraphVisualizer:
         print(f"총 노드 수: {summary['num_nodes']}개")
         print(f"총 엣지 수: {summary['num_edges']}개")
         print("그래프 렌더링 틀 준비 완료.")
+    def draw_weighted_graph(self):
+        """
+        [T20-2] 엣지의 가중치를 선의 두께와 색상으로 시각화하는 메서드
+        (Streamlit이나 대시보드에 넘겨줄 Figure 객체를 반환합니다)
+        """
+        G = nx.Graph()
+        G.add_nodes_from(range(self.num_nodes))
+        
+        for edge in self.edges:
+            G.add_edge(edge['source'], edge['target'], weight=edge.get('weight', 1.0))
+            
+        # 노드 위치 고정 (매번 모양이 바뀌지 않도록 seed 설정)
+        pos = nx.spring_layout(G, seed=42) 
+        
+        # 가중치 리스트 추출
+        weights = [G[u][v]['weight'] for u, v in G.edges()]
+        
+        fig, ax = plt.subplots(figsize=(8, 6))
+        
+        # 노드 렌더링
+        nx.draw_networkx_nodes(G, pos, node_color='lightblue', node_size=700, ax=ax)
+        nx.draw_networkx_labels(G, pos, font_family="sans-serif", ax=ax)
+        
+        # 엣지 렌더링 (가중치 비례 두께 및 색상 매핑)
+        nx.draw_networkx_edges(
+            G, pos, 
+            width=[w * 2 for w in weights], # 선 두께 
+            edge_color=weights,             # 선 색상 
+            edge_cmap=plt.cm.Reds,          # 붉은색 그라데이션
+            ax=ax
+        )
+        
+        ax.set_title("Party Conflict (Max-Cut) - Weight Visualization")
+        ax.axis('off')
+        
+        return fig
