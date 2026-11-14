@@ -66,9 +66,17 @@ def compare_algorithms(request: MaxCutRequest) -> ComparisonResponse:
     """세 알고리즘을 순차 실행하고, 한 종류가 실패해도 나머지 결과를 반환한다."""
     matrix = request.to_adjacency_matrix()
     inputs = request.to_solver_inputs()
+    # 11/15 수정 · 기존 3종 알고리즘을 공통 결과 수집 함수로 실행함.
+    runners = (("brute_force", _run_brute_force), ("sdp", _run_sdp), ("qaoa", _run_qaoa))
+    return _collect_comparison(matrix, inputs, runners)
+
+
+# 11/15 수정 · 4종 벤치마크에서도 결과 수집, 오류 처리, 근사비 계산을 재사용하도록 분리함.
+def _collect_comparison(matrix, inputs, runners) -> ComparisonResponse:
+    """Sprint 1 비교와 Sprint 2 벤치마크에 동일한 결과·오류 처리 규칙을 적용한다."""
     results = {}
     # BF를 먼저 실행하여 다른 알고리즘의 컷 값이 최적값을 넘는지도 검사한다.
-    for name, runner in (("brute_force", _run_brute_force), ("sdp", _run_sdp), ("qaoa", _run_qaoa)):
+    for name, runner in runners:
         try:
             result = runner(matrix, inputs)
             baseline = results.get("brute_force")
@@ -93,6 +101,7 @@ def compare_algorithms(request: MaxCutRequest) -> ComparisonResponse:
     # 실패한 알고리즘의 근사비는 비워 두고 전체 실행 상태를 구분한다.
     optimum, ratios = analyze_approximation_ratios(results)
     successes = sum(run.status == "success" for run in results.values())
-    status = "success" if successes == 3 else "partial_success" if successes else "error"
+    # 11/15 수정 · 실행한 알고리즘 수를 기준으로 전체 성공 여부를 판정함.
+    status = "success" if successes == len(results) else "partial_success" if successes else "error"
     return ComparisonResponse(status=status, num_nodes=len(matrix), results=results,
                               optimal_cut_value=optimum, approximation_ratios=ratios)

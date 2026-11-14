@@ -1,13 +1,16 @@
-"""세 알고리즘의 실행 파이프라인을 제공하는 FastAPI 진입점."""
+"""동기 비교와 비동기 벤치마크를 제공하는 FastAPI 진입점."""
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from .benchmark_routes import router as benchmark_router
 from .pipeline import compare_algorithms
 from .schemas import ComparisonResponse, MaxCutRequest
 
 # 서버 실행: .venv/Scripts/python.exe -m uvicorn api.main:app --reload
-app = FastAPI(title="Q-PartyCut 백엔드", description="QAOA·BF·SDP 실행 및 근사비 비교 API")
+# 11/15 수정 · API 설명을 갱신하고 비동기 벤치마크 Job 라우터를 등록함.
+app = FastAPI(title="Q-PartyCut 백엔드", description="Max-Cut 비교 및 비동기 벤치마크 API")
+app.include_router(benchmark_router)
 
 
 @app.exception_handler(RequestValidationError)
