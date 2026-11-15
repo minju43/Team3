@@ -2,6 +2,8 @@ import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
 import networkx as nx
+import requests
+import time
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(page_title="Q-PartyCut 대시보드", layout="wide")
@@ -58,61 +60,90 @@ run_clicked = st.sidebar.button("🚀 선택한 시나리오 실행 및 벤치�
 st.divider()
 
 # 레이아웃 2분할 (좌측: US-07 시각화 / 우측: US-08 벤치마크)
+# 레이아웃 2분할 (좌측: US-07 시각화 / 우측: US-08 벤치마크)
 col1, col2 = st.columns(2)
 
-# ==========================================
-# [US-07] 파티 2분할 공간 시각화 (좌측)
-# ==========================================
 with col1:
     st.subheader("🕸️ [US-07] 파티 분할 결과 시각화")
-    if run_clicked:
-        G = nx.Graph()
-        G.add_nodes_from(nodes)
-        G.add_edges_from(edges)
-
-        pos = nx.spring_layout(G, seed=42)
-        fig, ax = plt.subplots(figsize=(5, 4))
-
-        node_colors = ["#ff4b4b" if mock_bitstring[n] == '0' else "#1f77b4" for n in G.nodes()]
-        nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=500, ax=ax)
-        nx.draw_networkx_labels(G, pos, font_color="white", font_weight="bold", ax=ax)
-
-        cut_edges = []
-        normal_edges = []
-        for u, v in G.edges():
-            if u < len(mock_bitstring) and v < len(mock_bitstring):
-                if mock_bitstring[u] != mock_bitstring[v]:
-                    cut_edges.append((u, v))
-                else:
-                    normal_edges.append((u, v))
-            else:
-                normal_edges.append((u, v))
-
-        nx.draw_networkx_edges(G, pos, edgelist=normal_edges, edge_color="gray", alpha=0.5, ax=ax)
-        nx.draw_networkx_edges(G, pos, edgelist=cut_edges, edge_color="red", style="dashed", width=2.5, ax=ax)
-
-        st.pyplot(fig)
-    else:
-        st.info("좌측 사이드바에서 시나리오를 고르고 **실행 버튼**을 눌러주세요.")
-
-# ==========================================
-# [US-08] 4자 벤치마크 대시보드 UI 연동 (우측)
-# ==========================================
 with col2:
     st.subheader("📊 [US-08] 알고리즘 4자 성능 비교")
-    if run_clicked:
-        df = pd.DataFrame(mock_benchmarks)
-        
-        # 1. 성능 비교 데이터 표 출력
-        st.dataframe(df.style.highlight_max(subset=['max_cut_value'], color='lightgreen'), use_container_width=True)
-        
-        # 2. Max-Cut 밸류 막대그래프 시각화
-        fig2, ax2 = plt.subplots(figsize=(5, 3))
-        colors = ['#aec7e8', '#ffbb78', '#98df8a', '#ff9896']
-        ax2.bar(df["algorithm"], df["max_cut_value"], color=colors)
-        ax2.set_ylabel("Max-Cut Value")
-        ax2.set_ylim(0, max(df["max_cut_value"]) * 1.2)
-        plt.xticks(rotation=15, fontsize=9)
-        st.pyplot(fig2)
-    else:
-        st.info("실행 버튼을 누르면 Brute-Force, SDP, Raw QAOA, Mitigated QAOA 결과가 여기에 표시됩니다.")
+
+if run_clicked:
+    # 1. 엣지 데이터를 API용 인접 행렬로 변환
+    matrix = [[0.0 for _ in range(len(nodes))] for _ in range(len(nodes))]
+    for u, v in edges:
+        matrix[u][v] = 1.0
+        matrix[v][u] = 1.0
+
+    payload = {
+        "num_nodes": len(nodes),
+        "adjacency_matrix": matrix,
+        "backend": "noisy_sim",
+        "qaoa": {"p": 1, "maxiter": 40, "shots": 1024}
+    }
+
+    with st.spinner("양자 백엔드에서 시뮬레이션 및 오류 완화 진행 중..."):
+        try:
+            # 2. 비동기 API 호출 및 폴링
+            api_url = "http://127.0.0.1:8000/jobs"
+            res = requests.post(api_url, json=payload)
+            res.raise_for_status()
+            job_id = res.json()["job_id"]
+
+            while True:
+                status_res = requests.get(f"{api_url}/{job_id}")
+                status_data = status_res.json()
+                if status_data["status"] in ["completed", "failed"]:
+                    break
+                time.sleep(2)
+
+            # 3. 진짜 결과 데이터 추출
+            benchmarks = status_data["result"]["benchmarks"]
+            df = pd.DataFrame(benchmarks)
+            real_bitstring = status_data["result"]["results"]["mitigated_qaoa"]["result"]["bitstring"]
+            
+            st.success("✅ 양자 코어 백엔드 시뮬레이션 완료!")
+            
+            # --- 좌측 렌더링 (진짜 비트스트링 반영) ---
+            with col1:
+                G = nx.Graph()
+                G.add_nodes_from(nodes)
+                G.add_edges_from(edges)
+                pos = nx.spring_layout(G, seed=42)
+                fig, ax = plt.subplots(figsize=(5, 4))
+
+                node_colors = ["#ff4b4b" if real_bitstring[n] == '0' else "#1f77b4" for n in G.nodes()]
+                nx.draw_networkx_nodes(G, pos, node_color=node_colors, node_size=500, ax=ax)
+                nx.draw_networkx_labels(G, pos, font_color="white", font_weight="bold", ax=ax)
+
+                cut_edges, normal_edges = [], []
+                for u, v in G.edges():
+                    if real_bitstring[u] != real_bitstring[v]:
+                        cut_edges.append((u, v))
+                    else:
+                        normal_edges.append((u, v))
+
+                nx.draw_networkx_edges(G, pos, edgelist=normal_edges, edge_color="gray", alpha=0.5, ax=ax)
+                nx.draw_networkx_edges(G, pos, edgelist=cut_edges, edge_color="red", style="dashed", width=2.5, ax=ax)
+                st.pyplot(fig)
+
+            # --- 우측 렌더링 (진짜 벤치마크 차트 반영) ---
+            with col2:
+                st.dataframe(df.style.highlight_max(subset=['max_cut_value'], color='lightgreen'), use_container_width=True)
+                fig2, ax2 = plt.subplots(figsize=(5, 3))
+                colors = ['#aec7e8', '#ffbb78', '#98df8a', '#ff9896']
+                ax2.bar(df["algorithm"], df["max_cut_value"], color=colors)
+                ax2.set_ylabel("Max-Cut Value")
+                max_val = df["max_cut_value"].max()
+                if pd.notna(max_val) and max_val > 0:
+                    ax2.set_ylim(0, max_val * 1.2)
+                plt.xticks(rotation=15, fontsize=9)
+                st.pyplot(fig2)
+
+        except Exception as e:
+            st.error(f"백엔드 연결 실패! 서버가 켜져 있는지 확인하세요. 에러: {e}")
+else:
+    with col1:
+        st.info("좌측 사이드바에서 시나리오를 고르고 **실행 버튼**을 눌러주세요.")
+    with col2:
+        st.info("실행 버튼을 누르면 알고리즘 4자 성능 비교 결과가 여기에 표시됩니다.")
