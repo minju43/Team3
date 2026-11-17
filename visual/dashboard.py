@@ -22,44 +22,22 @@ preset_choice = st.sidebar.selectbox(
     ]
 )
 
-# 프리셋별 갈등 그래프 데이터 및 결과 비트스트링 정의
+# 프리셋별 갈등 그래프 데이터 정의
 if preset_choice == "시나리오 1: 대립 구도 (N=4)":
     nodes = [0, 1, 2, 3]
     edges = [(0, 1), (0, 2), (1, 3), (2, 3)]
-    mock_bitstring = "0110"
-    mock_benchmarks = [
-        {"algorithm": "Brute-Force", "max_cut_value": 18.5, "time": 0.05},
-        {"algorithm": "SDP", "max_cut_value": 16.2, "time": 0.12},
-        {"algorithm": "Raw QAOA", "max_cut_value": 17.0, "time": 1.50},
-        {"algorithm": "Mitigated QAOA", "max_cut_value": 18.2, "time": 1.65}
-    ]
 elif preset_choice == "시나리오 2: 삼각 동맹/갈등 (N=3)":
     nodes = [0, 1, 2]
     edges = [(0, 1), (1, 2), (2, 0)]
-    mock_bitstring = "010"
-    mock_benchmarks = [
-        {"algorithm": "Brute-Force", "max_cut_value": 12.0, "time": 0.02},
-        {"algorithm": "SDP", "max_cut_value": 12.0, "time": 0.08},
-        {"algorithm": "Raw QAOA", "max_cut_value": 10.5, "time": 1.10},
-        {"algorithm": "Mitigated QAOA", "max_cut_value": 11.8, "time": 1.25}
-    ]
 else:  # 시나리오 3: 다선형 복잡 갈등 (N=5)
     nodes = [0, 1, 2, 3, 4]
     edges = [(0, 1), (1, 2), (2, 3), (3, 4), (0, 4), (1, 3)]
-    mock_bitstring = "01011"
-    mock_benchmarks = [
-        {"algorithm": "Brute-Force", "max_cut_value": 24.0, "time": 0.15},
-        {"algorithm": "SDP", "max_cut_value": 21.5, "time": 0.20},
-        {"algorithm": "Raw QAOA", "max_cut_value": 19.0, "time": 2.10},
-        {"algorithm": "Mitigated QAOA", "max_cut_value": 22.8, "time": 2.30}
-    ]
 
 st.sidebar.info(f"선택된 프리셋: **{preset_choice}**\n- 노드: {nodes}\n- 엣지: {len(edges)}개")
 run_clicked = st.sidebar.button("🚀 선택한 시나리오 실행 및 벤치마크")
 
 st.divider()
 
-# 레이아웃 2분할 (좌측: US-07 시각화 / 우측: US-08 벤치마크)
 # 레이아웃 2분할 (좌측: US-07 시각화 / 우측: US-08 벤치마크)
 col1, col2 = st.columns(2)
 
@@ -75,11 +53,11 @@ if run_clicked:
         matrix[u][v] = 1.0
         matrix[v][u] = 1.0
 
+    # 피드백 반영: adjacency_matrix -> matrix 변경, "backend" 줄 삭제
     payload = {
         "num_nodes": len(nodes),
-        "adjacency_matrix": matrix,
-        "backend": "noisy_sim",
-        "qaoa": {"p": 1, "maxiter": 40, "shots": 1024}
+        "matrix": matrix,
+        "qaoa": {"p": 2, "maxiter": 40, "shots": 1024}
     }
 
     with st.spinner("양자 백엔드에서 시뮬레이션 및 오류 완화 진행 중..."):
@@ -97,14 +75,18 @@ if run_clicked:
                     break
                 time.sleep(2)
 
-            # 3. 진짜 결과 데이터 추출
+            if status_data["status"] == "failed":
+                st.error(f"시뮬레이션 작업 실패: {status_data.get('error', '알 수 없는 오류')}")
+                st.stop()
+
+            # 3. 실제 결과 데이터 추출
             benchmarks = status_data["result"]["benchmarks"]
             df = pd.DataFrame(benchmarks)
             real_bitstring = status_data["result"]["results"]["mitigated_qaoa"]["result"]["bitstring"]
             
             st.success("✅ 양자 코어 백엔드 시뮬레이션 완료!")
             
-            # --- 좌측 렌더링 (진짜 비트스트링 반영) ---
+            # --- 좌측 렌더링 (실제 비트스트링 반영) ---
             with col1:
                 G = nx.Graph()
                 G.add_nodes_from(nodes)
@@ -127,7 +109,7 @@ if run_clicked:
                 nx.draw_networkx_edges(G, pos, edgelist=cut_edges, edge_color="red", style="dashed", width=2.5, ax=ax)
                 st.pyplot(fig)
 
-            # --- 우측 렌더링 (진짜 벤치마크 차트 반영) ---
+            # --- 우측 렌더링 (실제 벤치마크 차트 반영) ---
             with col2:
                 st.dataframe(df.style.highlight_max(subset=['max_cut_value'], color='lightgreen'), use_container_width=True)
                 fig2, ax2 = plt.subplots(figsize=(5, 3))
