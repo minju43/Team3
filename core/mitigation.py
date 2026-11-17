@@ -35,13 +35,16 @@ def fold_circuit_globally(qc: QuantumCircuit, scale_factor: int) -> QuantumCircu
     return folded_qc
 
 
+# 11/18 수정 · 선택적 시드를 받아 ZNE 회로 변환과 배율별 샘플링에 적용함.
 def run_zne_estimator(
     bound_qc: QuantumCircuit,
     hamiltonian: SparsePauliOp,
     scale_factors: List[int] = [1, 3, 5],
     gate_error: float = 0.01,
     readout_error: float = 0.03,
-    shots: int = 2048
+    shots: int = 2048,
+    *,
+    seed: int | None = None,
 ) -> Dict[str, Any]:
     """
     [US-04] 노이즈 배율(1배, 3배, 5배)별로 기댓값을 측정한 뒤,
@@ -51,7 +54,8 @@ def run_zne_estimator(
     noise_model = manager.get_custom_noise_model(gate_error, readout_error)
     estimator = AerEstimator(
         backend_options={"noise_model": noise_model},
-        run_options={"shots": shots}
+        transpile_options={"seed_transpiler": seed},
+        run_options={"shots": shots, "seed": seed},
     )
 
     noisy_energies = []

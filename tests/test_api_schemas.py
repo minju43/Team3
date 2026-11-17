@@ -24,6 +24,12 @@ INVALID_INPUTS = [
     {"matrix": [[0] * 15 for _ in range(15)]},
     {"matrix": [[0, 1], [1, 0]], "qaoa": {"shots": 0}},
     {"matrix": [[0, 1], [1, 0]], "qaoa": {"p": True}},
+    # 11/18 수정 · 개수, 홀수 조건, 중복, 기준 배율, 정수형 검증 사례를 추가함.
+    {"matrix": [[0, 1], [1, 0]], "qaoa": {"zne_scales": [1]}},
+    {"matrix": [[0, 1], [1, 0]], "qaoa": {"zne_scales": [1, 2]}},
+    {"matrix": [[0, 1], [1, 0]], "qaoa": {"zne_scales": [1, 3, 3]}},
+    {"matrix": [[0, 1], [1, 0]], "qaoa": {"zne_scales": [3, 5]}},
+    {"matrix": [[0, 1], [1, 0]], "qaoa": {"zne_scales": [True, 3]}},
     {"matrix": [[0, 1], [1, 0]], "sdp": {"rounds": 1.5}},
     {"matrix": [[0, 1], [1, 0]], "sdp": {"seed": -1}},
     {"matrix": [[0, 1], [1, 0]], "unknown": 1},
@@ -37,7 +43,13 @@ def test_presets_and_independent_solver_mapping():
         request = MaxCutRequest.model_validate(preset)
         inputs = request.to_solver_inputs()
         assert validate_adjacency_matrix(inputs["qaoa_circuit"]["matrix"]) == preset["num_nodes"]
-        assert inputs["qaoa_sampler"] == {"shots": 1024}
+        # 11/18 수정 · 깊이와 시드 기본값, ZNE 배율 매핑 및 원본과의 독립성을 검증함.
+        assert inputs["qaoa_circuit"]["p"] == inputs["qaoa_optimizer"]["p"] == 2
+        assert inputs["qaoa_sampler"] == {"shots": 1024, "seed": 42}
+        assert inputs["qaoa_optimizer"]["seed"] == inputs["sdp"]["seed"] == 42
+        assert inputs["mitigation"]["zne_scales"] == [1, 3, 5]
+        inputs["mitigation"]["zne_scales"].append(7)
+        assert request.qaoa.zne_scales == [1, 3, 5]
         # 한 알고리즘의 입력을 바꿔도 원본과 다른 알고리즘의 입력은 유지되어야 한다.
         inputs["brute_force"]["adjacency"][0][1] = 999
         assert request.matrix[0][1] != 999

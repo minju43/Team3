@@ -10,6 +10,7 @@ from qiskit.quantum_info import SparsePauliOp
 from core.backend_manager import QuantumBackendManager
 
 
+# 11/18 수정 · 선택적 시드를 받아 최적화용 Aer 회로 변환과 샘플링에 적용함.
 def optimize_qaoa_parameters(
     qc: QuantumCircuit,
     hamiltonian: SparsePauliOp,
@@ -18,11 +19,14 @@ def optimize_qaoa_parameters(
     mode: str = "ideal",
     gate_error: float = 0.01,
     readout_error: float = 0.03,
-    shots: int = 1024
+    shots: int = 1024,
+    *,
+    seed: int | None = None,
 ):
+    transpile_options = {"seed_transpiler": seed}
     # 1. 모드에 따른 Estimator 설정 (이상적 모드일 때는 노이즈 없는 Aer Estimator 사용)
     if mode == "ideal":
-        estimator = AerEstimator()
+        estimator = AerEstimator(transpile_options=transpile_options, run_options={"seed": seed})
     elif mode == "noisy_sim":
         manager = QuantumBackendManager()
         noise_model = manager.get_custom_noise_model(
@@ -31,10 +35,11 @@ def optimize_qaoa_parameters(
         )
         estimator = AerEstimator(
             backend_options={"noise_model": noise_model},
-            run_options={"shots": shots}
+            transpile_options=transpile_options,
+            run_options={"shots": shots, "seed": seed},
         )
     else:
-        estimator = AerEstimator()
+        estimator = AerEstimator(transpile_options=transpile_options, run_options={"seed": seed})
 
 
     energy_history = []

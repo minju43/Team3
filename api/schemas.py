@@ -1,7 +1,8 @@
 """프리셋과 사용자 정의 Max-Cut 입력을 처리하는 Pydantic v2 스키마."""
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, model_validator
+# 11/18 수정 · ZNE 배율 검증에 사용할 field_validator를 추가함.
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, field_validator, model_validator
 
 from classical.common import prepare_adjacency_matrix
 
@@ -15,12 +16,22 @@ class InputModel(BaseModel):
 
 class QAOAOptions(InputModel):
     """QAOA 회로 깊이, 최대 최적화 횟수, 측정 횟수 및 오류 완화 옵션을 지정한다."""
-    p: PositiveInt = 1
+    # 11/18 수정 · QAOA 기본 회로 깊이를 2로 변경함.
+    p: PositiveInt = 2
     maxiter: PositiveInt = 100
     shots: PositiveInt = 1024
     seed: Seed | None = 42  # 튜닝된 시드값 고정
     mitigation_method: Literal["none", "m3", "zne", "both"] = "both"  # 완화 기법 선택 스위치
-    zne_scales: list[int] = Field(default=[1, 3, 5])  # 극한 노이즈 방어용 튜닝 배수
+    # 11/18 수정 · 기본 배율 [1, 3, 5]를 사용하고 1로 시작하는 서로 다른 양의 홀수를 두 개 이상 받음.
+    zne_scales: list[PositiveInt] = Field(default=[1, 3, 5], min_length=2)
+
+    @field_validator("zne_scales")
+    @classmethod
+    def validate_zne_scales(cls, scales: list[int]) -> list[int]:
+        # ZNE는 첫 측정값을 배율 1의 기준으로 사용한다.
+        if scales[0] != 1 or len(set(scales)) != len(scales) or any(scale % 2 == 0 for scale in scales):
+            raise ValueError("zne_scales must start with 1 and contain distinct positive odd integers")
+        return scales
 
 class SDPOptions(InputModel):
     """SDP 무작위 라운딩 횟수와 재현성을 위한 시드를 지정한다."""
@@ -56,12 +67,14 @@ class MaxCutRequest(GraphInput):
             "brute_force": {"adjacency": self.to_adjacency_matrix(), "max_nodes": 14},
             "sdp": {"adjacency": self.to_adjacency_matrix(), **self.sdp.model_dump()},
             "qaoa_circuit": {"matrix": self.to_adjacency_matrix(), "p": self.qaoa.p, "measure": False},
-            "qaoa_optimizer": {"p": self.qaoa.p, "maxiter": self.qaoa.maxiter},
+            # 11/18 수정 · QAOA 시드를 최적화에도 전달함. QAOA와 SDP의 기본 시드는 42임.
+            "qaoa_optimizer": {"p": self.qaoa.p, "maxiter": self.qaoa.maxiter, "seed": self.qaoa.seed},
             "qaoa_sampler": {"shots": self.qaoa.shots, "seed": self.qaoa.seed},
             "mitigation": {
                 "method": self.qaoa.mitigation_method,
-                "zne_scales": self.qaoa.zne_scales
-            }
+                # 11/18 수정 · 실행용 ZNE 배율 목록을 복사해 요청 원본을 보호함.
+                "zne_scales": self.qaoa.zne_scales.copy(),
+            },
         }
 
 class AlgorithmResult(InputModel):

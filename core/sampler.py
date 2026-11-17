@@ -12,6 +12,7 @@ from core.qaoa_circuit import bind_qaoa_parameters
 from core.backend_manager import QuantumBackendManager
 
 
+# 11/18 수정 · 선택적 시드를 받아 회로 변환과 Aer 샘플링에 적용함.
 def get_best_partition(
     qc: QuantumCircuit,
     gamma_vec: ParameterVector,
@@ -22,7 +23,9 @@ def get_best_partition(
     mode: str = "ideal",
     gate_error: float = 0.01,
     readout_error: float = 0.03,
-    apply_m3: bool = False
+    apply_m3: bool = False,
+    *,
+    seed: int | None = None,
 ) -> Tuple[str, List[int], List[int], dict]:
     """
     최적화된 파라미터를 회로에 바인딩하고 측정을 수행하여 최적의 파티션(비트스트링)을 반환합니다.
@@ -39,7 +42,7 @@ def get_best_partition(
 
     # 2. 모드에 따른 샘플링 및 M3 오류 완화 분기
     if mode == "ideal":
-        sampler = IdealSampler(run_options={"shots": shots})
+        sampler = IdealSampler(transpile_options={"seed_transpiler": seed}, run_options={"shots": shots, "seed": seed})
         job = sampler.run(bound_qc)
         result = job.result()
         quasi_dist = dict(result.quasi_dists[0])
@@ -53,8 +56,9 @@ def get_best_partition(
         )
 
         # 백엔드 하드웨어 게이트에 맞게 회로 변환(Transpile) 후 실행
-        transpiled_qc = transpile(bound_qc, backend)
-        job = backend.run(transpiled_qc, shots=shots)
+        transpiled_qc = transpile(bound_qc, backend, seed_transpiler=seed)
+        run_options = {"seed_simulator": seed} if mode == "noisy_sim" else {}
+        job = backend.run(transpiled_qc, shots=shots, **run_options)
         raw_counts = job.result().get_counts()
 
         if apply_m3:

@@ -87,9 +87,11 @@ def test_canvas_and_dashboard_contract(monkeypatch, local_aer_dependencies):
     shared_counts = []
     run_job = benchmark._run_quantum_job
 
-    def tracked_run(*args):
+    # 11/18 수정 · 요청의 시드가 실제 Aer 측정 호출에 전달되는지 검증함.
+    def tracked_run(*args, seed):
+        assert seed == 23
         aer_jobs.append(1)
-        counts = run_job(*args)
+        counts = run_job(*args, seed=seed)
         shared_counts.append(counts)
         assert release.wait(timeout=10)
         return counts
@@ -104,7 +106,8 @@ def test_canvas_and_dashboard_contract(monkeypatch, local_aer_dependencies):
     canvas = {"nodes": [{"id": 0}, {"id": 1}],
               "edges": [{"source": 0, "target": 1, "weight": 2.5}]}
     payload = json.loads(parse_to_adjacency_matrix(canvas))
-    payload.update(qaoa={"maxiter": 16, "shots": 128})
+    # 11/18 수정 · 기본값과 다른 깊이, 샷 수, 시드, ZNE 배율로 Job을 요청함.
+    payload.update(qaoa={"p": 3, "maxiter": 16, "shots": 128, "seed": 23, "zne_scales": [1, 5, 9]})
     try:
         status, headers, body = _http("POST", "/jobs", payload)
         assert status == 202
@@ -129,11 +132,18 @@ def test_canvas_and_dashboard_contract(monkeypatch, local_aer_dependencies):
     assert [row.algorithm for row in completed.result.benchmarks] == [
         "Brute-Force", "SDP", "Raw QAOA", "Mitigated QAOA",
     ]
+    # 11/18 수정 · 완화 전후 결과가 같은 깊이, 샷 수, 시드를 기록하는지 검증함.
+    raw = completed.result.results["raw_qaoa"].result
     mitigated = completed.result.results["mitigated_qaoa"].result
+    for result in (raw, mitigated):
+        assert result.details["p"] == 3
+        assert result.details["shots"] == 128
+        assert result.details["seed"] == 23
     assert mitigated.bitstring == "01"
     assert mitigated.partition == [[0], [1]]
     assert mitigated.cut_value == 2.5
-    assert mitigated.details["zne"]["scale_factors"] == [1, 3, 5]
+    # 11/18 수정 · 요청한 ZNE 배율이 외삽 결과에 반영됐는지 검증함.
+    assert mitigated.details["zne"]["scale_factors"] == [1, 5, 9]
     assert mitigated.details["distribution"]["00"] == -0.1
 
     status, headers, body = _http("GET", f"{path}/download", query="format=json")
@@ -215,7 +225,8 @@ def test_mitigation_failure_keeps_raw_result(monkeypatch, local_aer_dependencies
     """샷 제출은 한 번만 하고 M3 오류가 나도 Raw 결과와 고전 기준을 보존한다."""
     submissions = []
 
-    def sample(*_args):
+    # 11/18 수정 · 측정 대역 함수가 새 시드 인자를 받도록 맞춤.
+    def sample(*_args, seed):
         submissions.append(1)
         return {"10": 16}
 

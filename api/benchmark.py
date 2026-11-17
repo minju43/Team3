@@ -30,7 +30,8 @@ class _Measurement:
     elapsed: float
 
 
-def _run_quantum_job(circuit, backend, mode, shots, report_job):
+# 11/18 수정 · 측정 함수에서 시드를 받아 Aer 샘플링에 적용함.
+def _run_quantum_job(circuit, backend, mode, shots, report_job, *, seed=None):
     """측정 작업의 제공자 상태를 백그라운드에서 조회하고 원시 카운트를 반환한다."""
     if mode == "real_qpu":
         # IBM QPU는 ISA 회로를 Runtime Sampler에 제출한다.
@@ -38,7 +39,7 @@ def _run_quantum_job(circuit, backend, mode, shots, report_job):
 
         job = SamplerV2(mode=backend).run([circuit], shots=shots)
     else:
-        job = backend.run(circuit, shots=shots)
+        job = backend.run(circuit, shots=shots, seed_simulator=seed)
 
     job_id = job.job_id()
     while True:
@@ -98,6 +99,9 @@ def run_benchmark(request: BenchmarkRequest, report_job: Callable[[QuantumJob], 
     matrix = request.to_adjacency_matrix()
     inputs = request.to_solver_inputs()
     mode = request.backend
+    # 11/18 수정 · 요청에서 변환한 샷 수와 시드를 측정 및 ZNE에서 공통으로 사용함.
+    shots = inputs["qaoa_sampler"]["shots"]
+    seed = inputs["qaoa_sampler"]["seed"]
 
     @lru_cache(maxsize=1)
     def measure():
@@ -112,7 +116,6 @@ def run_benchmark(request: BenchmarkRequest, report_job: Callable[[QuantumJob], 
 
             operator, offset = build_maxcut_pauli_list(matrix)
             circuit, gamma_vec, beta_vec = build_qaoa_circuit(**inputs["qaoa_circuit"])
-            shots = request.qaoa.shots
             # 실제 장비에는 최적화 반복마다 제출하는 대신 Aer에서 구한 각도로 측정한다.
             gamma, beta, energy, _ = optimize_qaoa_parameters(
                 circuit, operator, **inputs["qaoa_optimizer"], shots=shots,
@@ -132,9 +135,13 @@ def run_benchmark(request: BenchmarkRequest, report_job: Callable[[QuantumJob], 
                 )
             else:
                 backend = manager.get_backend(mode, request.gate_error, request.readout_error)
-            measured = transpile(bound.measure_all(inplace=False), backend)
-            counts = _run_quantum_job(measured, backend, mode, shots, report_job)
-            details = {"backend": backend.name, "shots": shots, "optimizer_expected_cut_value": float(energy + offset)}
+            # 11/18 수정 · 회로 변환과 측정에 시드를 전달하고 비교 결과에 깊이, 샷 수, 시드를 기록함.
+            measured = transpile(bound.measure_all(inplace=False), backend, seed_transpiler=seed)
+            counts = _run_quantum_job(measured, backend, mode, shots, report_job, seed=seed)
+            details = {
+                "backend": backend.name, "p": inputs["qaoa_circuit"]["p"], "shots": shots, "seed": seed,
+                "optimizer_expected_cut_value": float(energy + offset),
+            }
             if not isfinite(details["optimizer_expected_cut_value"]):
                 raise AlgorithmExecutionError("QAOA 최적화 기댓값이 유한하지 않습니다.")
             return _Measurement(counts, measured, bound, backend, operator, offset,
@@ -166,9 +173,11 @@ def run_benchmark(request: BenchmarkRequest, report_job: Callable[[QuantumJob], 
                 try:
                     from core.mitigation import run_zne_estimator
 
+                    # 11/18 수정 · 요청의 ZNE 배율, 샷 수, 시드를 외삽 계산에 전달함.
                     zne = run_zne_estimator(measurement.bound_circuit, measurement.operator,
+                                            scale_factors=inputs["mitigation"]["zne_scales"],
                                             gate_error=request.gate_error, readout_error=request.readout_error,
-                                            shots=request.qaoa.shots)
+                                            shots=shots, seed=seed)
                     expected_cut = zne["zne_richardson_energy"] + measurement.offset
                     if not all(isfinite(value) for value in [expected_cut, *zne["noisy_energies"],
                                                             zne["raw_noisy_energy"], zne["zne_linear_energy"]]):
