@@ -11,6 +11,7 @@ from types import ModuleType, SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 
 from api import benchmark, benchmark_routes, jobs
 from api.benchmark_schemas import BenchmarkRequest, BenchmarkResponse, JobResponse
@@ -166,6 +167,17 @@ def test_validation_and_unknown_job():
     assert _http("GET", "/jobs/wrong-id")[0] == 422
     assert _http("POST", "/jobs", {"adjacency_matrix": [[0, 1], [2, 0]]})[0] == 422
     assert _http("POST", "/jobs", {"matrix": [[0, 1], [1, 0]], "backend": "unknown"})[0] == 422
+
+
+@pytest.mark.parametrize("field", ["matrix", "adjacency_matrix"])
+def test_graph_size_limit_applies_to_both_input_aliases(field):
+    valid = [[0] * 14 for _ in range(14)]
+    assert BenchmarkRequest.model_validate({field: valid}).num_nodes == 14
+
+    for oversized in ([[0] * 15 for _ in range(15)], [[0] * 15 for _ in range(2)]):
+        with pytest.raises(ValidationError) as exc:
+            BenchmarkRequest.model_validate({field: oversized})
+        assert exc.value.errors()[0]["type"] == "too_long"
 
 
 def test_full_queue_and_expired_result(monkeypatch):

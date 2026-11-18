@@ -9,6 +9,9 @@ from classical.common import prepare_adjacency_matrix
 PositiveInt = Annotated[int, Field(strict=True, gt=0)]
 Seed = Annotated[int, Field(strict=True, ge=0)]
 Weight = StrictInt | StrictFloat
+# 11/19 수정 · 행과 열의 크기를 제한하여 대형 행렬을 계산 전에 거절한다.
+GraphRow = Annotated[list[Weight], Field(min_length=2, max_length=14)]
+GraphMatrix = Annotated[list[GraphRow], Field(min_length=2, max_length=14)]
 
 class InputModel(BaseModel):
     """정의하지 않은 필드와 NaN·무한대 입력을 거절하는 공통 모델."""
@@ -40,7 +43,7 @@ class SDPOptions(InputModel):
 
 class GraphInput(InputModel):
     """인접 행렬과 선택적인 그래프 설명 정보를 입력받는다."""
-    matrix: list[list[Weight]]
+    matrix: GraphMatrix
     num_nodes: Annotated[int, Field(strict=True, ge=2, le=14)] | None = None
     name: str | None = None
     description: str | None = None

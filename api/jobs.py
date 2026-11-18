@@ -10,7 +10,7 @@ from .benchmark import run_benchmark
 from .benchmark_schemas import BenchmarkRequest, JobResponse, QuantumJob
 from .schemas import AlgorithmError
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error").getChild(__name__)
 
 
 class JobQueueFull(RuntimeError):
@@ -55,6 +55,9 @@ class JobQueue:
             except RuntimeError:
                 del self._jobs[job.job_id]
                 raise
+            # 실행 스레드가 running으로 전환하기 전에 등록을 로그에 기록한다.
+            logger.info("벤치마크 등록 job_id=%s backend=%s nodes=%s p=%s shots=%s", job.job_id, request.backend,
+                        request.num_nodes, request.qaoa.p, request.qaoa.shots)
         return job
 
     def get(self, job_id: UUID) -> JobResponse | None:
@@ -71,10 +74,20 @@ class JobQueue:
                 self._expires_at[job_id] = monotonic() + self._ttl
 
     def _run(self, job_id: UUID, request: BenchmarkRequest):
+        start = monotonic()
+        last_quantum_state = None
+
         def report_job(quantum_job: QuantumJob):
+            nonlocal last_quantum_state
+            if quantum_job == last_quantum_state:
+                return
             self._update(job_id, quantum_job=quantum_job)
+            last_quantum_state = quantum_job
+            logger.info("양자 작업 상태 job_id=%s provider_job_id=%s backend=%s status=%s",
+                        job_id, quantum_job.job_id, quantum_job.backend_name, quantum_job.status)
 
         self._update(job_id, status="running", started_at=datetime.now(timezone.utc))
+        logger.info("벤치마크 실행 job_id=%s", job_id)
         try:
             result = run_benchmark(request, report_job)
         except Exception:
@@ -87,3 +100,5 @@ class JobQueue:
             error = (AlgorithmError(code="all_algorithms_failed", message="모든 알고리즘 실행에 실패했습니다.")
                      if status == "failed" else None)
             self._update(job_id, status=status, finished_at=datetime.now(timezone.utc), result=result, error=error)
+            logger.info("벤치마크 종료 job_id=%s status=%s result=%s duration_s=%.3f",
+                        job_id, status, result.status, monotonic() - start)

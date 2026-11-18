@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import AliasChoices, Field
 
-from .schemas import AlgorithmError, AlgorithmRun, ApproximationRatio, ComparisonResponse, InputModel, MaxCutRequest, Weight
+from .schemas import AlgorithmError, AlgorithmRun, ApproximationRatio, ComparisonResponse, GraphMatrix, InputModel, MaxCutRequest
 
 BackendMode = Literal["ideal", "noisy_sim", "real_qpu"]
 JobStatus = Literal["queued", "running", "completed", "failed"]
@@ -23,7 +23,7 @@ BENCHMARK_LABELS = {
 class BenchmarkRequest(MaxCutRequest):
     """프리셋의 matrix와 캔버스의 adjacency_matrix를 모두 받는다."""
 
-    matrix: list[list[Weight]] = Field(validation_alias=AliasChoices("matrix", "adjacency_matrix"))
+    matrix: GraphMatrix = Field(validation_alias=AliasChoices("matrix", "adjacency_matrix"))
     backend: BackendMode = "noisy_sim"
     gate_error: Probability = 0.01
     readout_error: Probability = 0.03
