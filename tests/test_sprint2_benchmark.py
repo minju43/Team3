@@ -11,7 +11,9 @@ from types import ModuleType, SimpleNamespace
 from uuid import uuid4
 
 import pytest
+from fastapi import HTTPException, Response
 from pydantic import ValidationError
+from starlette.datastructures import Headers
 
 from api import benchmark, benchmark_routes, jobs
 from api.benchmark_schemas import BenchmarkRequest, BenchmarkResponse, JobResponse
@@ -185,9 +187,9 @@ def test_full_queue_and_expired_result(monkeypatch):
     clock = [0.0]
     run_benchmark = benchmark.run_benchmark
 
-    def blocked_run(request, report_job):
+    def blocked_run(request, report_job, *, credentials=None):
         assert release.wait(timeout=10)
-        return run_benchmark(request, report_job)
+        return run_benchmark(request, report_job, credentials=credentials)
 
     monkeypatch.setattr(jobs, "monotonic", lambda: clock[0])
     monkeypatch.setattr(jobs, "run_benchmark", blocked_run)
@@ -231,6 +233,205 @@ def test_runtime_job_states(monkeypatch):
     assert benchmark._run_quantum_job(circuit, backend, "real_qpu", 32, recorded.append) == {"01": 32}
     assert [job.status for job in recorded] == ["queued", "running", "done"]
     assert {job.job_id for job in recorded} == {"provider-id"}
+
+
+@pytest.mark.parametrize(("method", "scales"), [
+    ("none", [1]), ("m3", [1]), ("zne", [1, 3, 5]), ("both", [1, 3, 5]),
+])
+def test_qpu_mitigation_and_download(monkeypatch, local_aer_dependencies, method, scales):
+    """실제 장비 호출을 대체해 배율별 회로, 기댓값, 다운로드를 검증한다."""
+    from qiskit.providers.fake_provider import GenericBackendV2
+    from qiskit.quantum_info import Operator
+    from core import backend_manager, optimizer
+
+    backend = GenericBackendV2(num_qubits=4, seed=2)
+    calibration_snapshot = object()
+    calibration_reads = []
+    corrected_counts = []
+    submissions = []
+    key = "test-personal-ibm-key"
+    instance = "crn:v1:test-instance"
+    personal = method == "both"
+    by_scale = [{"01": 24, "00": 8}, {"01": 16, "00": 16}, {"01": 8, "00": 24}]
+    monkeypatch.setattr(backend, "configuration", lambda: SimpleNamespace(simulator=False), raising=False)
+
+    def read_properties():
+        calibration_reads.append(1)
+        return calibration_snapshot
+
+    monkeypatch.setattr(backend, "properties", read_properties, raising=False)
+
+    def get_backend(name):
+        assert name == backend.name
+        return backend
+
+    def connect_server(_manager):
+        assert not personal
+        return SimpleNamespace(backend=get_backend)
+
+    def connect_personal(*, channel, token, instance):
+        assert personal
+        assert (channel, token, instance) == ("ibm_quantum_platform", key, "crn:v1:test-instance")
+        return SimpleNamespace(backend=get_backend)
+
+    monkeypatch.setattr(backend_manager.QuantumBackendManager, "connect_ibm_service", connect_server)
+
+    def optimize(_circuit, _operator, *, p, mode, **_options):
+        assert mode == "ideal"
+        return [0.4] * p, [0.0] * p, 0.0, []
+
+    monkeypatch.setattr(optimizer, "optimize_qaoa_parameters", optimize)
+
+    def correct(counts, *_args, properties):
+        assert properties is calibration_snapshot
+        corrected_counts.append(counts)
+        probability = counts["01"] / 32 + 0.25
+        return {"01": probability, "00": 1 - probability}
+
+    monkeypatch.setattr(benchmark, "_mitigate_counts", correct)
+
+    class Sampler:
+        def __init__(self, *, mode):
+            assert mode is backend
+
+        def run(self, circuits, *, shots):
+            assert len(circuits) == len(scales)
+            assert shots == 32
+            submissions.append(circuits)
+            base = Operator(circuits[0].remove_final_measurements(inplace=False))
+            for circuit in circuits:
+                assert Operator(circuit.remove_final_measurements(inplace=False)).equiv(base)
+                for item in circuit.data:
+                    if item.operation.name != "barrier":
+                        qubits = tuple(circuit.find_bit(qubit).index for qubit in item.qubits)
+                        assert backend.target.instruction_supported(item.operation.name, qubits)
+            results = [
+                SimpleNamespace(data=SimpleNamespace(meas=SimpleNamespace(get_counts=lambda data=data: data)))
+                for data in by_scale[:len(scales)]
+            ]
+            return SimpleNamespace(job_id=lambda: "provider-id", status=lambda: "DONE", result=lambda: results)
+
+    sdk = sys.modules["qiskit_ibm_runtime"]
+    monkeypatch.setattr(sdk, "QiskitRuntimeService", connect_personal)
+    monkeypatch.setattr(sdk, "SamplerV2", Sampler, raising=False)
+    queue = jobs.JobQueue(workers=1)
+    monkeypatch.setattr(benchmark_routes, "queue", queue)
+    request = BenchmarkRequest(
+        matrix=[[0, 3], [3, 0]], backend="real_qpu", qpu_backend_name=backend.name,
+        qpu_auth="personal" if personal else None,
+        qaoa={"p": 1, "shots": 32, "mitigation_method": method},
+    )
+    if personal:
+        response = Response()
+        submitted = benchmark_routes.submit_job(
+            request, SimpleNamespace(headers=Headers(), url_for=lambda *_args, **_kwargs: SimpleNamespace(path="/jobs")),
+            response, key, instance,
+        )
+        assert key not in submitted.model_dump_json()
+        assert response.headers["cache-control"] == "no-store"
+    else:
+        submitted = queue.submit(request)
+    job_id = submitted.job_id
+    deadline = monotonic() + 20
+    while (job := queue.get(job_id)).status in {"queued", "running"}:
+        assert monotonic() < deadline
+        sleep(0.01)
+    result = job.result
+    assert job.status == "completed" and result.status == "success"
+    assert len(submissions) == 1
+    assert result.request == request
+    assert result.job_id == job_id
+    qem = result.qem
+    assert qem.provider_job_id == "provider-id"
+    assert qem.ideal_expected_cut == pytest.approx(1.5)
+    assert qem.raw_expected_cut == pytest.approx(2.25)
+    assert [point.scale for point in qem.samples] == scales
+    assert [point.counts for point in qem.samples] == by_scale[:len(scales)]
+    assert all(point.measurement_mapping == qem.samples[0].measurement_mapping for point in qem.samples)
+    gate_counts = [point.two_qubit_gates for point in qem.samples]
+    assert gate_counts[0] > 0
+    assert gate_counts == [scale * gate_counts[0] for scale in scales]
+    if method in {"m3", "both"}:
+        assert calibration_reads == [1]
+        assert corrected_counts == by_scale[:len(scales)]
+        assert qem.m3_expected_cut == pytest.approx(3.0)
+        assert result.results["mitigated_qaoa"].result.cut_value == 3.0
+    else:
+        assert not calibration_reads and not corrected_counts
+        assert qem.m3_expected_cut is None
+        assert "mitigated_qaoa" not in result.results
+    if method in {"zne", "both"}:
+        assert qem.zne_expected_cut == pytest.approx(2.625)
+    else:
+        assert qem.zne_expected_cut is None
+    if method == "both":
+        # 외삽이 최적 컷 3을 초과해도 값을 잘라내지 않는다.
+        assert qem.m3_zne_expected_cut == pytest.approx(3.375)
+    else:
+        assert qem.m3_zne_expected_cut is None
+
+    exported_json = benchmark_routes.download_job(job_id, format="json")
+    assert BenchmarkResponse.model_validate_json(exported_json.body) == result
+    exported_csv = benchmark_routes.download_job(job_id, format="csv")
+    for data in (job.model_dump_json().encode(), exported_json.body, exported_csv.body):
+        assert key.encode() not in data
+        assert instance.encode() not in data
+    rows = list(csv.DictReader(StringIO(exported_csv.body.decode("utf-8-sig"))))
+    assert [row["key"] for row in rows] == [entry.key for entry in result.benchmarks]
+    assert {row["graph_id"] for row in rows} == {result.graph_id}
+    assert {row["p"] for row in rows} == {"1"}
+    assert {row["shots"] for row in rows} == {"32"}
+    assert {row["qpu_shots_used"] for row in rows} == {str(32 * len(scales))}
+
+
+@pytest.mark.parametrize(("backend", "auth", "key", "instance", "duplicates"), [
+    ("real_qpu", "personal", None, None, False),
+    ("real_qpu", None, "", None, False),
+    ("real_qpu", None, None, "crn:v1:test-instance", False),
+    ("real_qpu", "personal", "private-test-key", "bad-instance", False),
+    ("real_qpu", "server", "private-test-key", None, False),
+    ("noisy_sim", None, "private-test-key", None, False),
+    ("real_qpu", "personal", "private-test-key", None, True),
+])
+def test_invalid_personal_qpu_headers_do_not_queue(monkeypatch, backend, auth, key, instance, duplicates):
+    def unexpected_submission(*_args, **_kwargs):
+        pytest.fail("잘못된 자격 증명 요청이 큐에 등록됐습니다.")
+
+    monkeypatch.setattr(benchmark_routes, "queue", SimpleNamespace(submit=unexpected_submission))
+    headers = Headers(raw=[(b"x-ibm-api-key", b"private-test-key")] * 2 if duplicates else [])
+    payload = BenchmarkRequest(matrix=[[0, 1], [1, 0]], backend=backend, qpu_auth=auth)
+    with pytest.raises(HTTPException) as rejected:
+        benchmark_routes.submit_job(payload, SimpleNamespace(headers=headers), Response(), key, instance)
+    assert rejected.value.status_code == 400
+    assert "private-test-key" not in rejected.value.detail
+
+
+def test_personal_qpu_auth_failure_does_not_leak_or_fall_back(monkeypatch, local_aer_dependencies, caplog):
+    from pydantic import SecretStr
+    from api.qpu_credentials import PersonalQpuCredentials
+    from core import backend_manager, optimizer
+
+    key = "private-ibm-key-in-exception"
+    server_calls = []
+    monkeypatch.setattr(optimizer, "optimize_qaoa_parameters",
+                        lambda *_args, **_kwargs: ([0.4], [0.0], 0.0, []))
+    monkeypatch.setattr(backend_manager.QuantumBackendManager, "connect_ibm_service",
+                        lambda _: server_calls.append(1))
+
+    def reject(**_kwargs):
+        raise RuntimeError(key)
+
+    monkeypatch.setattr(sys.modules["qiskit_ibm_runtime"], "QiskitRuntimeService", reject)
+    payload = BenchmarkRequest(
+        matrix=[[0, 1], [1, 0]], backend="real_qpu", qpu_auth="personal", qaoa={"p": 1},
+    )
+    result = benchmark.run_benchmark(payload, lambda _: None,
+                                     credentials=PersonalQpuCredentials(SecretStr(key)))
+    assert result.status == "partial_success"
+    assert result.results["raw_qaoa"].error.code == "invalid_result"
+    assert not server_calls
+    assert key not in result.model_dump_json()
+    assert key not in caplog.text
 
 
 def test_mitigation_failure_keeps_raw_result(monkeypatch, local_aer_dependencies):

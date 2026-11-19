@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 
 from .benchmark import run_benchmark
 from .benchmark_schemas import BenchmarkRequest, JobResponse, QuantumJob
+from .qpu_credentials import PersonalQpuCredentials
 from .schemas import AlgorithmError
 
 logger = logging.getLogger("uvicorn.error").getChild(__name__)
@@ -36,7 +37,7 @@ class JobQueue:
                 del self._expires_at[job_id]
                 del self._jobs[job_id]
 
-    def submit(self, request: BenchmarkRequest) -> JobResponse:
+    def submit(self, request: BenchmarkRequest, *, credentials: PersonalQpuCredentials | None = None) -> JobResponse:
         """작업을 등록하고 계산이 끝나기 전에 큐 등록 응답을 반환한다."""
         job = JobResponse(job_id=uuid4(), status="queued", backend=request.backend,
                           created_at=datetime.now(timezone.utc))
@@ -51,7 +52,7 @@ class JobQueue:
                 del self._jobs[oldest]
             self._jobs[job.job_id] = job
             try:
-                self._executor.submit(self._run, job.job_id, request)
+                self._executor.submit(self._run, job.job_id, request, credentials)
             except RuntimeError:
                 del self._jobs[job.job_id]
                 raise
@@ -73,7 +74,7 @@ class JobQueue:
             if changes.get("finished_at") is not None:
                 self._expires_at[job_id] = monotonic() + self._ttl
 
-    def _run(self, job_id: UUID, request: BenchmarkRequest):
+    def _run(self, job_id: UUID, request: BenchmarkRequest, credentials: PersonalQpuCredentials | None):
         start = monotonic()
         last_quantum_state = None
 
@@ -89,9 +90,12 @@ class JobQueue:
         self._update(job_id, status="running", started_at=datetime.now(timezone.utc))
         logger.info("벤치마크 실행 job_id=%s", job_id)
         try:
-            result = run_benchmark(request, report_job)
+            result = run_benchmark(request, report_job, credentials=credentials)
         except Exception:
-            logger.exception("벤치마크 Job 실행 실패: %s", job_id)
+            if credentials is None:
+                logger.exception("벤치마크 Job 실행 실패: %s", job_id)
+            else:
+                logger.error("개인 자격 증명으로 실행한 벤치마크 Job 실패: %s", job_id)
             self._update(job_id, status="failed", finished_at=datetime.now(timezone.utc),
                          error=AlgorithmError(code="benchmark_failed", message="벤치마크 작업 실행 중 오류가 발생했습니다."))
         else:
@@ -99,6 +103,8 @@ class JobQueue:
             status = "failed" if result.status == "error" else "completed"
             error = (AlgorithmError(code="all_algorithms_failed", message="모든 알고리즘 실행에 실패했습니다.")
                      if status == "failed" else None)
-            self._update(job_id, status=status, finished_at=datetime.now(timezone.utc), result=result, error=error)
+            finished_at = datetime.now(timezone.utc)
+            result = result.model_copy(update={"job_id": job_id, "finished_at": finished_at})
+            self._update(job_id, status=status, finished_at=finished_at, result=result, error=error)
             logger.info("벤치마크 종료 job_id=%s status=%s result=%s duration_s=%.3f",
                         job_id, status, result.status, monotonic() - start)

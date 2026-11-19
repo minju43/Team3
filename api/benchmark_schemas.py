@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import AliasChoices, Field
+from pydantic import AliasChoices, Field, model_validator
 
 from .schemas import AlgorithmError, AlgorithmRun, ApproximationRatio, ComparisonResponse, GraphMatrix, InputModel, MaxCutRequest
 
@@ -27,6 +27,16 @@ class BenchmarkRequest(MaxCutRequest):
     backend: BackendMode = "noisy_sim"
     gate_error: Probability = 0.01
     readout_error: Probability = 0.03
+    qpu_backend_name: str | None = Field(default=None, min_length=1)
+    qpu_auth: Literal["server", "personal"] | None = None
+
+    @model_validator(mode="after")
+    def validate_qpu_options(self):
+        if self.qpu_backend_name is not None and self.backend != "real_qpu":
+            raise ValueError("qpu_backend_name requires backend=real_qpu")
+        if self.qpu_auth is not None and self.backend != "real_qpu":
+            raise ValueError("qpu_auth requires backend=real_qpu")
+        return self
 
 
 class BenchmarkRow(InputModel):
@@ -44,6 +54,34 @@ class BenchmarkRow(InputModel):
     error_message: str | None
 
 
+class QEMSample(InputModel):
+    """폴딩 배율 하나의 실제 장비 측정과 후처리 결과."""
+
+    scale: int
+    shots: int
+    depth: int
+    two_qubit_gates: int
+    measurement_mapping: dict[int, int]
+    counts: dict[str, int]
+    raw_expected_cut: float
+    m3_expected_cut: float | None = None
+
+
+class QEMReport(InputModel):
+    """대표 분할의 Cut과 별도로 계산한 오류 완화 기댓값."""
+
+    raw_expected_cut: float | None = None
+    m3_expected_cut: float | None = None
+    zne_expected_cut: float | None = None
+    m3_zne_expected_cut: float | None = None
+    ideal_expected_cut: float | None = None
+    extrapolator: Literal["linear"] | None = None
+    provider_job_id: str | None = None
+    backend_name: str | None = None
+    samples: list[QEMSample] = Field(default_factory=list)
+    errors: dict[str, str] = Field(default_factory=dict)
+
+
 class BenchmarkResponse(ComparisonResponse):
     """비교 상세 결과에 실행 백엔드와 대시보드용 표를 추가한다."""
 
@@ -51,6 +89,11 @@ class BenchmarkResponse(ComparisonResponse):
     results: dict[BenchmarkKey, AlgorithmRun]
     approximation_ratios: dict[BenchmarkKey, ApproximationRatio]
     benchmarks: list[BenchmarkRow]
+    request: BenchmarkRequest | None = None
+    graph_id: str | None = None
+    job_id: UUID | None = None
+    finished_at: datetime | None = None
+    qem: QEMReport | None = None
 
 
 class QuantumJob(InputModel):
