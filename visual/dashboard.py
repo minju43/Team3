@@ -33,7 +33,7 @@ elif platform.system() == "Darwin":
     plt.rcParams["font.family"] = "AppleGothic"
 plt.rcParams["axes.unicode_minus"] = False
 
-# --- 실험 로그 CSV 경로 탐색 (프로젝트 루트 및 현재 경로 모두 대응) ---
+# --- 실험 로그 CSV 경로 탐색 ---
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_LOG_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "quantum_experiment_logs.csv"))
 LOCAL_LOG_PATH = os.path.abspath("quantum_experiment_logs.csv")
@@ -440,6 +440,28 @@ div[data-testid="stSlider"] [data-testid="stThumbValue"] {
     color: #34d399 !important;
     letter-spacing: 2px;
 }
+.report-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin-top: 8px;
+    margin-bottom: 14px;
+    font-size: 13.5px;
+}
+.report-table th {
+    background-color: #1e293b;
+    color: #e2e8f0;
+    font-weight: 700;
+    padding: 9px 12px;
+    text-align: center;
+    border-bottom: 1px solid #334155;
+}
+.report-table td {
+    background-color: #111827;
+    color: #f8fafc;
+    padding: 9px 12px;
+    text-align: center;
+    border-bottom: 1px solid #1e293b;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -611,8 +633,10 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
             mit_bs, mit_cut = raw_bs, raw_cut
 
         shot_time_add = 0.00012 * shots
-        t_raw = f"{0.12 + 0.07 * p_depth + shot_time_add:.2f}s"
-        t_mit = f"{0.24 + 0.12 * p_depth + shot_time_add * 1.5:.2f}s"
+        raw_sec = round(0.12 + 0.07 * p_depth + shot_time_add, 3)
+        mit_sec = round(0.24 + 0.12 * p_depth + shot_time_add * 1.5, 3)
+        t_raw = f"{raw_sec:.2f}s"
+        t_mit = f"{mit_sec:.2f}s"
     else:
         raw_base_by_p = {1: 0.68, 2: 0.63, 3: 0.56, 4: 0.50}.get(p_depth, 0.62)
         mit_base_by_p = {1: 0.93, 2: 0.89, 3: 0.83, 4: 0.77}.get(p_depth, 0.88)
@@ -628,8 +652,13 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
             mit_bs, mit_cut = bf_bs, bf_cut
 
         shot_time_add = 0.0015 * shots
-        t_raw = f"{10.2 + 1.8 * p_depth + shot_time_add:.1f}s (대기포함)"
-        t_mit = f"{11.2 + 2.1 * p_depth + shot_time_add * 1.3:.1f}s"
+        raw_sec = round(10.2 + 1.8 * p_depth + shot_time_add, 2)
+        mit_sec = round(11.2 + 2.1 * p_depth + shot_time_add * 1.3, 2)
+        t_raw = f"{raw_sec:.1f}s (대기포함)"
+        t_mit = f"{mit_sec:.1f}s"
+
+    bf_sec = round(0.004 * (2 ** min(n_cnt, 10)), 4)
+    gw_sec = round(0.085 + 0.012 * n_cnt, 4)
 
     gap = max(0.0, mit_cut - raw_cut)
     return {
@@ -661,12 +690,120 @@ def build_benchmark_tables_from_sim(sim_res: dict):
     mit_ratio = round(mit_cut / bf_cut, 3)
 
     bm_list = [
-        {"algorithm": "BF (고전)", "max_cut_value": bf_cut, "ratio": 1.000},
-        {"algorithm": "GW (고전)", "max_cut_value": gw_cut, "ratio": gw_ratio},
-        {"algorithm": "Raw (양자)", "max_cut_value": raw_cut, "ratio": raw_ratio},
-        {"algorithm": "완화 (양자)", "max_cut_value": mit_cut, "ratio": mit_ratio},
+        {"algorithm": "BF (고전)", "max_cut_value": bf_cut, "ratio": 1.000, "time_str": sim_res.get("t_bf", "-")},
+        {"algorithm": "GW (고전)", "max_cut_value": gw_cut, "ratio": gw_ratio, "time_str": sim_res.get("t_gw", "-")},
+        {"algorithm": "Raw (양자)", "max_cut_value": raw_cut, "ratio": raw_ratio, "time_str": sim_res.get("t_raw", "-")},
+        {"algorithm": "완화 (양자)", "max_cut_value": mit_cut, "ratio": mit_ratio, "time_str": sim_res.get("t_mit", "-")},
     ]
     return bm_list
+
+# ==========================================
+# [실시간 연동형] 현재 실행 파라미터·결과 기반 20회 정량 분석 데이터 생성
+# ==========================================
+def generate_dynamic_experiment_df(
+    num_tests: int = 20,
+    use_fixed_seed: bool = False,
+    show_progress: bool = False
+) -> pd.DataFrame:
+    benchmarks = st.session_state.get("benchmarks", [])
+    sim_res = st.session_state.get("sim_result", {})
+    backend_name = st.session_state.get("sim_backend_choice", "Aer 무잡음 시뮬레이터")
+    p_depth = int(st.session_state.get("qaoa_p_selector", 1))
+    shots = int(st.session_state.get("qaoa_shots_selector", 1024))
+    n_nodes = len(st.session_state.get("nodes", []))
+
+    raw_ratio = float(benchmarks[2]["ratio"]) if len(benchmarks) >= 4 else 0.65
+    mit_ratio = float(benchmarks[3]["ratio"]) if len(benchmarks) >= 4 else 0.90
+    gap = max(0.0, mit_ratio - raw_ratio)
+
+    mean_acc_raw = raw_ratio
+    mean_acc_m3 = min(1.0, raw_ratio + gap * 0.42)
+    mean_acc_zne = min(1.0, raw_ratio + gap * 0.72)
+    mean_acc_znem3 = mit_ratio
+
+    shot_std_factor = math.sqrt(1024.0 / max(float(shots), 64.0))
+    std_raw = 0.048 * shot_std_factor
+    std_m3 = 0.038 * shot_std_factor
+    std_zne = 0.045 * shot_std_factor
+    std_znem3 = 0.026 * shot_std_factor
+
+    is_qpu = (backend_name == "IBM 실제 QPU 하드웨어")
+    shot_scale = shots / 1024.0
+    p_scale = 0.75 + 0.25 * p_depth
+
+    if is_qpu:
+        base_t_raw = float(sim_res.get("raw_sec", 12.0))
+        base_t_m3 = base_t_raw * 1.18
+        base_t_zne = base_t_raw * 2.85
+        base_t_znem3 = float(sim_res.get("mit_sec", base_t_raw * 3.10))
+        if base_t_znem3 < base_t_zne:
+            base_t_znem3 = base_t_zne * 1.08
+
+        cost_raw = round(5.0 * shot_scale * p_scale, 2)
+        cost_m3 = round(6.5 * shot_scale * p_scale, 2)
+        cost_zne = round(15.0 * shot_scale * p_scale, 2)
+        cost_znem3 = round(16.5 * shot_scale * p_scale, 2)
+    else:
+        base_t_raw = float(sim_res.get("raw_sec", 0.35))
+        base_t_m3 = base_t_raw * 1.25
+        base_t_zne = base_t_raw * 2.75
+        base_t_znem3 = max(float(sim_res.get("mit_sec", 0.65)), base_t_zne * 1.08)
+
+        cost_raw = round(0.5 * shot_scale * p_scale, 2)
+        cost_m3 = round(0.65 * shot_scale * p_scale, 2)
+        cost_zne = round(1.50 * shot_scale * p_scale, 2)
+        cost_znem3 = round(1.65 * shot_scale * p_scale, 2)
+
+    rng = np.random.default_rng(42 if use_fixed_seed else None)
+    records = []
+
+    if show_progress:
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+    for i in range(num_tests):
+        if show_progress:
+            status_text.text(f"🧪 현재 설정(N={n_nodes}, p={p_depth}, {shots}샷) 퀀텀 실험 중... ({i+1}/{num_tests})")
+
+        records.append({
+            "Test_ID": i + 1, "Method": "Raw (None)",
+            "Accuracy": float(np.clip(rng.normal(mean_acc_raw, std_raw), 0.05, 1.0)),
+            "Time_sec": max(0.05, float(rng.normal(base_t_raw, base_t_raw * 0.08))),
+            "Cost_USD": cost_raw
+        })
+        records.append({
+            "Test_ID": i + 1, "Method": "M3 Only",
+            "Accuracy": float(np.clip(rng.normal(mean_acc_m3, std_m3), 0.05, 1.0)),
+            "Time_sec": max(0.05, float(rng.normal(base_t_m3, base_t_m3 * 0.07))),
+            "Cost_USD": cost_m3
+        })
+        records.append({
+            "Test_ID": i + 1, "Method": "ZNE Only",
+            "Accuracy": float(np.clip(rng.normal(mean_acc_zne, std_zne), 0.05, 1.0)),
+            "Time_sec": max(0.05, float(rng.normal(base_t_zne, base_t_zne * 0.07))),
+            "Cost_USD": cost_zne
+        })
+        records.append({
+            "Test_ID": i + 1, "Method": "ZNE + M3",
+            "Accuracy": float(np.clip(rng.normal(mean_acc_znem3, std_znem3), 0.05, 1.0)),
+            "Time_sec": max(0.05, float(rng.normal(base_t_znem3, base_t_znem3 * 0.06))),
+            "Cost_USD": cost_znem3
+        })
+
+        if show_progress:
+            progress_bar.progress((i + 1) / num_tests)
+            time.sleep(0.02)
+
+    if show_progress:
+        progress_bar.empty()
+        status_text.empty()
+
+    df = pd.DataFrame(records)
+    try:
+        df.to_csv(LOG_FILE, index=False)
+    except Exception:
+        pass
+    return df
 
 def sync_session_simulation(nodes, edges, backend_name: str, p_depth: int, shots: int = 1024):
     sim_res = run_local_benchmark_simulation(nodes, edges, backend_name, p_depth, shots)
@@ -686,6 +823,14 @@ def render_enterprise_analytics_section():
     if not HAS_PLOTLY:
         st.error("Plotly 패키지가 설치되어 있지 않습니다. 터미널에서 `pip install plotly` 실행 후 새로고침해 주세요.")
         return
+
+    preset_cur = st.session_state.get("current_preset", "기본 파티 갈등망 (N=8)")
+    n_cur = len(st.session_state.get("nodes", []))
+    backend_cur = st.session_state.get("sim_backend_choice", "Aer 무잡음 시뮬레이터")
+    p_cur = int(st.session_state.get("qaoa_p_selector", 1))
+    shots_cur = int(st.session_state.get("qaoa_shots_selector", 1024))
+    has_solved = st.session_state.get("has_solved", False)
+    benchmarks = st.session_state.get("benchmarks", [])
 
     with st.container(border=True):
         st.markdown(
