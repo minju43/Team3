@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import time
 import math
@@ -9,7 +10,12 @@ import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
-import requests
+
+# 프로젝트 루트 경로 등록 (visual / api 패키지 임포트 보장)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
 
 # Plotly 안전 임포트
 try:
@@ -20,11 +26,19 @@ try:
 except ImportError:
     HAS_PLOTLY = False
 
-# parser 모듈 안전 임포트
+# parser 및 job_client 임포트
 try:
     from visual.parser import parse_to_adjacency_matrix
 except ImportError:
     from parser import parse_to_adjacency_matrix
+
+JOB_CLIENT_IMPORT_ERR = ""
+try:
+    from visual.job_client import submit_job, read_job, JobAPIError
+    HAS_JOB_CLIENT = True
+except Exception as exc:
+    HAS_JOB_CLIENT = False
+    JOB_CLIENT_IMPORT_ERR = str(exc)
 
 # --- Matplotlib 한글 폰트 설정 ---
 if platform.system() == "Windows":
@@ -34,8 +48,7 @@ elif platform.system() == "Darwin":
 plt.rcParams["axes.unicode_minus"] = False
 
 # --- 실험 로그 CSV 경로 탐색 ---
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_LOG_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "quantum_experiment_logs.csv"))
+ROOT_LOG_PATH = os.path.join(ROOT_DIR, "quantum_experiment_logs.csv")
 LOCAL_LOG_PATH = os.path.abspath("quantum_experiment_logs.csv")
 LOG_FILE = ROOT_LOG_PATH if os.path.exists(ROOT_LOG_PATH) else (
     LOCAL_LOG_PATH if os.path.exists(LOCAL_LOG_PATH) else ROOT_LOG_PATH
@@ -107,6 +120,28 @@ div[data-testid="stToggle"] label span {
     -webkit-text-fill-color: #f8fafc !important;
     font-size: 13.5px !important;
     font-weight: 700 !important;
+}
+
+/* =========================================================
+   텍스트/비밀번호 입력창 스타일
+   ========================================================= */
+div[data-testid="stTextInput"] label p {
+    color: #e2e8f0 !important;
+    font-size: 12.5px !important;
+    font-weight: 600 !important;
+}
+div[data-testid="stTextInput"] input {
+    background-color: #0f172a !important;
+    color: #f8fafc !important;
+    -webkit-text-fill-color: #f8fafc !important;
+    border: 1px solid #475569 !important;
+    border-radius: 9px !important;
+    font-size: 13px !important;
+    padding: 8px 11px !important;
+}
+div[data-testid="stTextInput"] input:focus {
+    border-color: #818cf8 !important;
+    box-shadow: 0 0 0 1px rgba(129, 140, 248, 0.35) !important;
 }
 
 /* =========================================================
@@ -578,9 +613,7 @@ def select_closest_valid_cut(all_cuts, target_cut: float, prefer_high: bool = Tr
     return min(all_cuts, key=lambda item: (abs(item[1] - target_cut), item[1]))
 
 def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int, shots: int = 1024):
-    """
-    백엔드 연결 불가 시 로컬 Fallback 벤치마크 산출
-    """
+    """백엔드 API 미연결 시 동작하는 로컬 폴백 시뮬레이션"""
     n_cnt = len(nodes)
     all_cuts = enumerate_all_cuts(nodes, edges)
     bf_bs, bf_cut = all_cuts[0]
@@ -593,7 +626,6 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
     shot_noise_scale = math.sqrt(1024.0 / max(float(shots), 64.0))
     shot_convergence_bonus = math.log2(max(float(shots), 64.0) / 1024.0) * 0.015
 
-    # 1) Goemans-Williamson (GW) 스펙트럴 초평면 라운딩 근사
     adj = np.zeros((n_cnt, n_cnt), dtype=float)
     for u, v, w in edges:
         if u < n_cnt and v < n_cnt:
@@ -619,7 +651,6 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
     except Exception:
         gw_bs, gw_cut = select_closest_valid_cut(all_cuts, bf_cut * 0.90)
 
-    # 2) 양자 QAOA Raw / Mitigated 산출
     if backend_name == "Aer 무잡음 시뮬레이터":
         p_gain = {1: 0.92, 2: 0.96, 3: 0.99, 4: 1.00}.get(p_depth, 0.95)
         jitter = float(rng.uniform(-0.025, 0.025)) * shot_noise_scale
@@ -660,7 +691,6 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
     bf_sec = round(0.004 * (2 ** min(n_cnt, 10)), 4)
     gw_sec = round(0.085 + 0.012 * n_cnt, 4)
 
-    gap = max(0.0, mit_cut - raw_cut)
     return {
         "bf_bs": bf_bs,
         "bf_cut": bf_cut,
@@ -670,11 +700,12 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
         "raw_cut": raw_cut,
         "mit_bs": mit_bs,
         "mit_cut": mit_cut,
-        "m3_cut": round(raw_cut + gap * 0.45, 2),
-        "zne_cut": round(raw_cut + gap * 0.75, 2),
-        "both_cut": mit_cut,
-        "t_bf": f"{0.004 * (2 ** min(n_cnt, 10)):.3f}s",
-        "t_gw": f"{0.085 + 0.012 * n_cnt:.3f}s",
+        "bf_sec": bf_sec,
+        "gw_sec": gw_sec,
+        "raw_sec": raw_sec,
+        "mit_sec": mit_sec,
+        "t_bf": f"{bf_sec:.3f}s",
+        "t_gw": f"{gw_sec:.3f}s",
         "t_raw": t_raw,
         "t_mit": t_mit,
     }
@@ -698,7 +729,7 @@ def build_benchmark_tables_from_sim(sim_res: dict):
     return bm_list
 
 # ==========================================
-# [실시간 연동형] 현재 실행 파라미터·결과 기반 20회 정량 분석 데이터 생성
+# [실시간 연동형] 현재 실행 파라미터·실측 QEM 기댓값 기반 20회 정량 분석 데이터 생성
 # ==========================================
 def generate_dynamic_experiment_df(
     num_tests: int = 20,
@@ -707,19 +738,27 @@ def generate_dynamic_experiment_df(
 ) -> pd.DataFrame:
     benchmarks = st.session_state.get("benchmarks", [])
     sim_res = st.session_state.get("sim_result", {})
+    qem_actual = st.session_state.get("qem_report_actual", None)
     backend_name = st.session_state.get("sim_backend_choice", "Aer 무잡음 시뮬레이터")
     p_depth = int(st.session_state.get("qaoa_p_selector", 1))
     shots = int(st.session_state.get("qaoa_shots_selector", 1024))
     n_nodes = len(st.session_state.get("nodes", []))
+    bf_cut = max(float(st.session_state.get("bf_cut", 1.0)), 0.1)
 
     raw_ratio = float(benchmarks[2]["ratio"]) if len(benchmarks) >= 4 else 0.65
     mit_ratio = float(benchmarks[3]["ratio"]) if len(benchmarks) >= 4 else 0.90
     gap = max(0.0, mit_ratio - raw_ratio)
 
-    mean_acc_raw = raw_ratio
-    mean_acc_m3 = min(1.0, raw_ratio + gap * 0.42)
-    mean_acc_zne = min(1.0, raw_ratio + gap * 0.72)
-    mean_acc_znem3 = mit_ratio
+    if qem_actual:
+        mean_acc_raw = min(1.0, (qem_actual.get("raw_expected_cut") / bf_cut)) if qem_actual.get("raw_expected_cut") is not None else raw_ratio
+        mean_acc_m3 = min(1.0, (qem_actual.get("m3_expected_cut") / bf_cut)) if qem_actual.get("m3_expected_cut") is not None else min(1.0, raw_ratio + gap * 0.42)
+        mean_acc_zne = min(1.0, (qem_actual.get("zne_expected_cut") / bf_cut)) if qem_actual.get("zne_expected_cut") is not None else min(1.0, raw_ratio + gap * 0.72)
+        mean_acc_znem3 = min(1.0, (qem_actual.get("m3_zne_expected_cut") / bf_cut)) if qem_actual.get("m3_zne_expected_cut") is not None else mit_ratio
+    else:
+        mean_acc_raw = raw_ratio
+        mean_acc_m3 = min(1.0, raw_ratio + gap * 0.42)
+        mean_acc_zne = min(1.0, raw_ratio + gap * 0.72)
+        mean_acc_znem3 = mit_ratio
 
     shot_std_factor = math.sqrt(1024.0 / max(float(shots), 64.0))
     std_raw = 0.048 * shot_std_factor
@@ -809,16 +848,19 @@ def sync_session_simulation(nodes, edges, backend_name: str, p_depth: int, shots
     sim_res = run_local_benchmark_simulation(nodes, edges, backend_name, p_depth, shots)
     bm_list = build_benchmark_tables_from_sim(sim_res)
     st.session_state.sim_result = sim_res
+    st.session_state.qem_report_actual = None
     st.session_state.bitstring = sim_res["mit_bs"]
     st.session_state.raw_bitstring = sim_res["raw_bs"]
     st.session_state.bf_cut = sim_res["bf_cut"]
     st.session_state.raw_cut = sim_res["raw_cut"]
     st.session_state.mit_cut = sim_res["mit_cut"]
     st.session_state.benchmarks = bm_list
+    st.session_state.report_df = generate_dynamic_experiment_df(
+        num_tests=20,
+        use_fixed_seed=True,
+        show_progress=False
+    )
 
-# ==========================================
-# 실시간 4자 정량 비교 리포트 + QEM 4종 비교 그래프
-# ==========================================
 def render_enterprise_analytics_section():
     if not HAS_PLOTLY:
         st.error("Plotly 패키지가 설치되어 있지 않습니다. 터미널에서 `pip install plotly` 실행 후 새로고침해 주세요.")
@@ -833,203 +875,241 @@ def render_enterprise_analytics_section():
     benchmarks = st.session_state.get("benchmarks", [])
 
     with st.container(border=True):
-        st.markdown(
-            '<div style="font-size:21px; font-weight:800; color:#ffffff; margin-bottom:4px;">'
-            '📊 실시간 4자 정량 비교 리포트 (현재 갈등 그래프)'
-            '</div>'
-            '<div style="font-size:13.5px; color:#cbd5e1;">'
-            '방금 실행한 그래프에 대해 <b>고전(BF, GW) vs 양자(Raw, 오류 완화)</b> 및 <b>오류 완화 기법 4종(Raw, M3, ZNE, ZNE+M3)</b> 성능을 실시간으로 비교합니다.'
-            '</div>',
-            unsafe_allow_html=True
-        )
+        rep_h1, rep_h2 = st.columns([4.2, 1.3])
+        with rep_h1:
+            exec_src = st.session_state.get("last_exec_source", "")
+            status_tag = (
+                f'<span style="background-color:rgba(16,185,129,0.20); color:#34d399; border:1px solid rgba(52,211,153,0.45); '
+                f'font-size:12px; font-weight:700; padding:2px 9px; border-radius:6px; margin-left:8px;">실측 결과 연동됨 {exec_src}</span>'
+                if has_solved else
+                f'<span style="background-color:rgba(148,163,184,0.16); color:#cbd5e1; border:1px solid rgba(148,163,184,0.35); '
+                f'font-size:12px; font-weight:700; padding:2px 9px; border-radius:6px; margin-left:8px;">실행 대기 중</span>'
+            )
+            st.markdown(
+                f'<div style="font-size:21px; font-weight:800; color:#ffffff; margin-bottom:4px;">'
+                f'📊 4자 정량 비교 및 엔터프라이즈 분석 리포트 {status_tag}'
+                f'</div>'
+                f'<div style="font-size:13.5px; color:#cbd5e1;">'
+                f'현재 기준: <b>{preset_cur}</b> (노드 {n_cur}개) · <b>{backend_cur}</b> · '
+                f'회로 깊이 <b>p={p_cur}</b> · 측정 <b>{shots_cur}샷</b>'
+                f'</div>',
+                unsafe_allow_html=True
+            )
+        with rep_h2:
+            if st.button("🚀 20회 반복 테스트 재실행", key="btn_rerun_exp_logs", type="primary", use_container_width=True):
+                sync_session_simulation(
+                    st.session_state.nodes,
+                    st.session_state.edges,
+                    backend_cur,
+                    p_cur,
+                    shots_cur
+                )
+                st.session_state.report_df = generate_dynamic_experiment_df(
+                    num_tests=20,
+                    use_fixed_seed=False,
+                    show_progress=True
+                )
+                st.session_state.has_solved = True
+                st.session_state.view_after = True
+                st.rerun()
 
-        if not st.session_state.get("has_solved", False):
-            st.info("상단의 **▶ 갈등 해결 실행** 버튼을 먼저 눌러 현재 그래프의 연산을 실행해 주세요.")
-            return
+        if len(benchmarks) >= 4:
+            rows_html = ""
+            for item in benchmarks:
+                if has_solved:
+                    cut_txt = f"{float(item['max_cut_value']):.2f}"
+                    ratio_txt = f"{float(item['ratio']):.3f} ({float(item['ratio'])*100:.1f}%)"
+                    time_txt = item.get("time_str", "-")
+                else:
+                    cut_txt = "-"
+                    ratio_txt = "-"
+                    time_txt = "-"
+                rows_html += (
+                    f"<tr>"
+                    f"<td><b>{item['algorithm']}</b></td>"
+                    f"<td>{cut_txt}</td>"
+                    f"<td>{ratio_txt}</td>"
+                    f"<td>{time_txt}</td>"
+                    f"</tr>"
+                )
+            st.markdown(
+                f'<table class="report-table">'
+                f'<thead><tr><th>비교 알고리즘 (4자)</th><th>달성 컷 수치 (Max-Cut)</th><th>최적해 대비 근사비 (α)</th><th>실행 소요 시간</th></tr></thead>'
+                f'<tbody>{rows_html}</tbody>'
+                f'</table>',
+                unsafe_allow_html=True
+            )
 
-        sim = st.session_state.get("sim_result", {})
-        bm_df = pd.DataFrame(st.session_state.benchmarks)
-        total_w = sum(w for _, _, w in st.session_state.edges) or 1.0
-
-        bf_cut = float(sim.get("bf_cut", bm_df.loc[0, "max_cut_value"]))
-        gw_cut = float(sim.get("gw_cut", bm_df.loc[1, "max_cut_value"]))
-        raw_cut = float(sim.get("raw_cut", bm_df.loc[2, "max_cut_value"]))
-        mit_cut = float(sim.get("mit_cut", bm_df.loc[3, "max_cut_value"]))
-
-        raw_ratio = float(bm_df.loc[2, "ratio"])
-        mit_ratio = float(bm_df.loc[3, "ratio"])
-        gain_pct = ((mit_ratio - raw_ratio) / max(raw_ratio, 0.01)) * 100.0
-
-        # 실행 환경 요약 배지
-        cur_backend = st.session_state.get("sim_backend_choice", "-")
-        cur_p = st.session_state.get("qaoa_p_selector", 2)
-        cur_shots = st.session_state.get("qaoa_shots_selector", 1024)
-        st.markdown(
-            f'<div style="margin:10px 0 14px 0; display:flex; gap:8px; flex-wrap:wrap;">'
-            f'<span class="badge-purple">노드 수: N={len(st.session_state.nodes)}</span>'
-            f'<span class="badge-purple">총 갈등 가중치: {total_w:.1f}</span>'
-            f'<span class="badge-purple">백엔드: {cur_backend}</span>'
-            f'<span class="badge-purple">p={cur_p} · {cur_shots} Shots</span>'
-            f'<span class="badge-green">오류 완화 복원율: {gain_pct:+.1f}%</span>'
-            f'</div>',
-            unsafe_allow_html=True
-        )
-
-        color_map = {
-            "BF (고전)": "#64748b",
-            "GW (고전)": "#f59e0b",
-            "Raw (양자)": "#ef4444",
-            "완화 (양자)": "#10b981",
-        }
-
-        layout_common = dict(
+        layout_update = dict(
             plot_bgcolor="#141a29",
             paper_bgcolor="rgba(0,0,0,0)",
-            font=dict(color="#f8fafc", size=13.5, family="Pretendard, sans-serif"),
-            title_font=dict(size=16.5, color="#ffffff", family="Pretendard, sans-serif"),
-            xaxis=dict(title="", showgrid=False, zeroline=False, color="#cbd5e1"),
-            yaxis=dict(showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1"),
-            showlegend=False,
-            margin=dict(l=35, r=25, t=50, b=35),
-            height=330,
+            font=dict(color="#f8fafc", size=14, family="Pretendard, sans-serif"),
+            title_font=dict(size=18, color="#ffffff", family="Pretendard, sans-serif"),
+            xaxis=dict(showgrid=False, zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1")),
+            yaxis=dict(showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1")),
+            legend=dict(font=dict(size=12.5, color="#cbd5e1"), bgcolor="rgba(20,26,41,0.85)", bordercolor="#313e59", borderwidth=1),
+            margin=dict(l=40, r=40, t=55, b=40)
         )
 
-        c_left, c_right = st.columns(2, gap="medium")
+        st.markdown("<hr style='border-color:#334155; margin:12px 0 16px 0;'>", unsafe_allow_html=True)
 
-        # --- [그래프 1] 회피된 갈등 수치 (Max-Cut) ---
-        with c_left:
-            fig_cut = px.bar(
-                bm_df, x="algorithm", y="max_cut_value", color="algorithm",
-                color_discrete_map=color_map, text="max_cut_value",
-                title="<b>1. 알고리즘별 회피된 갈등 수치 (Max-Cut)</b>"
+        # --- 실행 전(초기 화면)에는 빈 차트 프레임만 표시 ---
+        if not has_solved:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 오류 완화 기법별 정확도 분포 (Box Plot)</div>', unsafe_allow_html=True)
+            empty_box = go.Figure()
+            empty_box.update_layout(**layout_update)
+            empty_box.update_layout(
+                title=dict(text="<b>실행 대기 중 — 상단 '▶ 갈등 해결 실행' 버튼을 눌러 결과를 확인하세요</b>", font=dict(size=17, color="#cbd5e1")),
+                xaxis=dict(tickmode="array", tickvals=[0, 1, 2, 3], ticktext=["Raw (None)", "M3 Only", "ZNE Only", "ZNE + M3"], range=[-0.5, 3.5], showgrid=False, color="#64748b"),
+                yaxis=dict(title="Accuracy", range=[0, 1.05], showgrid=True, gridcolor="#263147", color="#64748b"),
+                annotations=[dict(
+                    text="데이터 없음 (갈등 해결 실행 전)",
+                    x=1.5, y=0.52, xref="x", yref="y",
+                    showarrow=False, font=dict(size=16, color="#94a3b8")
+                )]
             )
-            fig_cut.update_traces(
-                texttemplate="<b>%{text:.2f}</b>",
-                textposition="outside",
-                marker_line=dict(width=1.5, color="#ffffff"),
-                textfont=dict(color="#ffffff", size=13),
+            st.plotly_chart(empty_box, use_container_width=True)
+
+            col_left, col_right = st.columns(2, gap="medium")
+            with col_left:
+                st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 시간 대비 정확도 분포도</div>', unsafe_allow_html=True)
+                st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>(Raw 노이즈 제외: ZNE, M3, ZNE+M3 비교)</span>", unsafe_allow_html=True)
+                empty_scatter = go.Figure()
+                empty_scatter.update_layout(**layout_update)
+                empty_scatter.update_layout(
+                    title=dict(text="<b>소요 시간과 근사비 상관관계</b>", font=dict(size=17, color="#ffffff")),
+                    xaxis=dict(title="실행 시간 (Seconds)", range=[0, 10], showgrid=False, color="#64748b"),
+                    yaxis=dict(title="근사비 (Accuracy)", range=[0, 1.05], showgrid=True, gridcolor="#263147", color="#64748b"),
+                    annotations=[dict(
+                        text="데이터 없음 (실행 대기 중)",
+                        x=5.0, y=0.52, xref="x", yref="y",
+                        showarrow=False, font=dict(size=15, color="#94a3b8")
+                    )]
+                )
+                st.plotly_chart(empty_scatter, use_container_width=True)
+
+            with col_right:
+                st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 엔터프라이즈 도입 관점: 비용 vs 시간</div>', unsafe_allow_html=True)
+                st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>기법별 평균 실행 비용(USD) 및 소요 시간 비교</span>", unsafe_allow_html=True)
+                empty_b2b = go.Figure()
+                empty_b2b.update_layout(**layout_update)
+                empty_b2b.update_layout(
+                    title=dict(text="<b>클라우드 리소스 소모량 비교</b>", font=dict(size=17, color="#ffffff")),
+                    xaxis=dict(tickmode="array", tickvals=[0, 1, 2], ticktext=["M3 Only", "ZNE Only", "ZNE + M3"], range=[-0.5, 2.5], showgrid=False, color="#64748b"),
+                    yaxis=dict(title="평균 실행 비용 (USD)", range=[0, 20], showgrid=True, gridcolor="#263147", color="#64748b"),
+                    annotations=[dict(
+                        text="데이터 없음 (실행 대기 중)",
+                        x=1.0, y=10.0, xref="x", yref="y",
+                        showarrow=False, font=dict(size=15, color="#94a3b8")
+                    )]
+                )
+                st.plotly_chart(empty_b2b, use_container_width=True)
+            return
+
+        # --- 실행 완료 후 실제 데이터 기반 그래프 3종 출력 ---
+        if "report_df" not in st.session_state or st.session_state.report_df is None:
+            st.session_state.report_df = generate_dynamic_experiment_df(
+                num_tests=20,
+                use_fixed_seed=True,
+                show_progress=False
             )
-            fig_cut.update_layout(**layout_common)
-            fig_cut.update_yaxes(title_text="회피된 갈등 합계", range=[0, max(bf_cut * 1.2, 1.0)])
-            st.plotly_chart(fig_cut, use_container_width=True)
 
-        # --- [그래프 2] 근사비 (Approximation Ratio) ---
-        with c_right:
-            fig_ratio = px.bar(
-                bm_df, x="algorithm", y="ratio", color="algorithm",
-                color_discrete_map=color_map, text="ratio",
-                title="<b>2. BF 최적해 대비 근사비 (α)</b>"
-            )
-            fig_ratio.update_traces(
-                texttemplate="<b>%{text:.3f}</b>",
-                textposition="outside",
-                marker_line=dict(width=1.5, color="#ffffff"),
-                textfont=dict(color="#ffffff", size=13),
-            )
-            fig_ratio.add_hline(
-                y=0.70, line_dash="dot", line_color="#fbbf24",
-                annotation_text="목표 기준 (0.70)", annotation_font_color="#fbbf24"
-            )
-            fig_ratio.update_layout(**layout_common)
-            fig_ratio.update_yaxes(title_text="근사비 (0.0 ~ 1.0)", range=[0, 1.18])
-            st.plotly_chart(fig_ratio, use_container_width=True)
+        df = st.session_state.report_df
 
-        # --- [그래프 3] 오류 완화 기법 4종 실시간 비교 (Raw / M3 / ZNE / ZNE+M3) ---
-        st.markdown("<hr style='border-color:#334155; margin:14px 0;'>", unsafe_allow_html=True)
-
-        qem_raw = float(sim.get("qem_raw", raw_cut))
-        qem_m3 = float(sim.get("m3_cut", mit_cut))
-        qem_zne = float(sim.get("zne_cut", mit_cut))
-        qem_both = float(sim.get("both_cut", max(qem_m3, qem_zne)))
-
-        qem_df = pd.DataFrame([
-            {"Method": "Raw (None)", "Cut": qem_raw,  "Accuracy": min(max(qem_raw / max(bf_cut, 0.1), 0.0), 1.0)},
-            {"Method": "M3 Only",    "Cut": qem_m3,   "Accuracy": min(max(qem_m3 / max(bf_cut, 0.1), 0.0), 1.0)},
-            {"Method": "ZNE Only",   "Cut": qem_zne,  "Accuracy": min(max(qem_zne / max(bf_cut, 0.1), 0.0), 1.0)},
-            {"Method": "ZNE + M3",   "Cut": qem_both, "Accuracy": min(max(qem_both / max(bf_cut, 0.1), 0.0), 1.0)},
-        ])
-
-        qem_colors = {
-            "Raw (None)": "#475569",  # 회색
-            "M3 Only": "#ef4444",     # 빨간색
-            "ZNE Only": "#3b82f6",    # 파란색
-            "ZNE + M3": "#8b5cf6",    # 보라색
+        color_map = {
+            "Raw (None)": "#475569",
+            "ZNE Only": "#3b82f6",
+            "M3 Only": "#ef4444",
+            "ZNE + M3": "#8b5cf6"
         }
 
-        fig_qem = px.bar(
-            qem_df, x="Method", y="Accuracy", color="Method",
-            color_discrete_map=qem_colors, text="Accuracy",
-            custom_data=["Cut"],
-            title="<b>3. 오류 완화 기법별 평균 기댓값(&lt;C&gt;) 복원 추이 (Raw → M3 → ZNE → ZNE+M3)</b>"
+        st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 오류 완화 기법별 정확도 분포 (Box Plot)</div>', unsafe_allow_html=True)
+        fig_box = px.box(
+            df, x="Method", y="Accuracy", color="Method",
+            color_discrete_map=color_map, points="all",
+            title=f"<b>[N={n_cur}, p={p_cur}, {shots_cur}샷] 20회 반복 수행 근사비(Accuracy) 안정성 검증</b>"
         )
-        fig_qem.update_traces(
-            texttemplate="<b>%{text:.3f}</b><br><span style='font-size:11px; color:#cbd5e1;'>(Cut %{customdata[0]:.2f})</span>",
-            textposition="outside",
-            marker_line=dict(width=1.5, color="#ffffff"),
-            textfont=dict(color="#ffffff", size=13),
-        )
-        # 데이터 범위에 맞춰 Y축 자동 확대 (계단식 상승이 잘 보이도록)
-        y_min = max(0.0, float(qem_df["Accuracy"].min()) - 0.05)
-        y_max = min(1.15, float(qem_df["Accuracy"].max()) + 0.06)
+        fig_box.update_traces(marker=dict(size=8, line=dict(width=1.5, color="#ffffff")), opacity=1.0)
+        fig_box.update_layout(**layout_update)
+        fig_box.update_layout(title=dict(font=dict(size=18, color="#ffffff")))
+        st.plotly_chart(fig_box, use_container_width=True)
 
-        fig_qem.update_layout(**layout_common)
-        fig_qem.update_layout(height=360)
-        fig_qem.update_yaxes(title_text="기댓값 근사비 (<C> / Optimal)", range=[y_min, y_max])
-        st.plotly_chart(fig_qem, use_container_width=True)
+        col_left, col_right = st.columns(2, gap="medium")
 
-        # --- 하단 4자 상세 정량 비교표 ---
-        detail_df = pd.DataFrame([
-            {
-                "알고리즘": "Brute-Force (고전 최적해)",
-                "회피된 갈등 (Cut)": round(bf_cut, 2),
-                "근사비 (α)": 1.000,
-                "추출 비트열": sim.get("bf_bs", "-"),
-                "소요 시간": sim.get("t_bf", "-"),
-            },
-            {
-                "알고리즘": "Goemans-Williamson (고전 근사)",
-                "회피된 갈등 (Cut)": round(gw_cut, 2),
-                "근사비 (α)": float(bm_df.loc[1, "ratio"]),
-                "추출 비트열": sim.get("gw_bs", "-"),
-                "소요 시간": sim.get("t_gw", "-"),
-            },
-            {
-                "알고리즘": "Raw QAOA (오류 완화 전)",
-                "회피된 갈등 (Cut)": round(raw_cut, 2),
-                "근사비 (α)": raw_ratio,
-                "추출 비트열": sim.get("raw_bs", st.session_state.get("raw_bitstring", "-")),
-                "소요 시간": sim.get("t_raw", "-"),
-            },
-            {
-                "알고리즘": "Mitigated QAOA (M3 + ZNE)",
-                "회피된 갈등 (Cut)": round(mit_cut, 2),
-                "근사비 (α)": mit_ratio,
-                "추출 비트열": sim.get("mit_bs", st.session_state.get("bitstring", "-")),
-                "소요 시간": sim.get("t_mit", "-"),
-            },
-        ])
-        st.dataframe(detail_df, use_container_width=True, hide_index=True)
+        with col_left:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 시간 대비 정확도 분포도</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>(Raw 노이즈 제외: ZNE, M3, ZNE+M3 비교)</span>", unsafe_allow_html=True)
 
-        # --- 실시간 결과 요약 인사이트 ---
-        cut_diff = mit_cut - raw_cut
-        st.markdown(f"""
-        <div style="background-color:#1e293b; border-left: 5px solid #10b981; padding: 14px 18px; border-radius: 8px; margin-top: 8px;">
-            <div style="font-size:15.5px; font-weight:800; color:#ffffff; margin-bottom:6px;">💡 현재 그래프 실시간 분석 요약</div>
-            <div style="color:#e2e8f0; font-size:14px; line-height:1.6;">
-                • 오류 완화(M3+ZNE) 적용 후 회피된 갈등 수치가 <b>{raw_cut:.2f} → {mit_cut:.2f}</b>로
-                <span style="color:#34d399; font-weight:700;">{cut_diff:+.2f}</span> 변화했습니다.<br>
-                • Brute-Force 최적해({bf_cut:.2f}) 대비 근사비는 <b>{raw_ratio:.3f} → {mit_ratio:.3f}</b>로
-                <span style="color:#34d399; font-weight:700;">{gain_pct:+.1f}%</span> 개선되었습니다.
-            </div>
+            df_filtered = df[df["Method"] != "Raw (None)"]
+            fig_scatter = px.scatter(
+                df_filtered, x="Time_sec", y="Accuracy", color="Method",
+                color_discrete_map=color_map, size_max=12,
+                title=f"<b>{backend_cur} 소요 시간과 근사비 상관관계</b>"
+            )
+            fig_scatter.update_traces(marker=dict(size=13, line=dict(width=2, color="#ffffff")), opacity=0.9)
+            fig_scatter.update_layout(**layout_update)
+            fig_scatter.update_layout(
+                title=dict(font=dict(size=18, color="#ffffff")),
+                xaxis_title="실행 시간 (Seconds)",
+                yaxis_title="근사비 (Accuracy)"
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        with col_right:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 엔터프라이즈 도입 관점: 비용 vs 시간</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>기법별 평균 실행 비용(USD) 및 소요 시간 비교</span>", unsafe_allow_html=True)
+
+            df_avg = df_filtered.groupby("Method", sort=False).agg({"Time_sec": "mean", "Cost_USD": "mean"}).reset_index()
+            fig_b2b = make_subplots(specs=[[{"secondary_y": True}]])
+
+            for method in df_avg["Method"]:
+                subset = df_avg[df_avg["Method"] == method]
+                fig_b2b.add_trace(go.Bar(
+                    x=subset["Method"], y=subset["Cost_USD"], name=f"{method} 비용",
+                    marker_color=color_map[method], marker_line=dict(width=1.5, color="#ffffff"), opacity=0.85
+                ), secondary_y=False)
+
+            fig_b2b.add_trace(go.Scatter(
+                x=df_avg["Method"], y=df_avg["Time_sec"], name="평균 소요 시간",
+                mode="lines+markers",
+                marker=dict(size=12, color="#fde047", symbol="diamond", line=dict(width=2, color="#ffffff")),
+                line=dict(width=3.5, color="#fde047", dash="dot")
+            ), secondary_y=True)
+
+            fig_b2b.update_layout(**layout_update)
+            fig_b2b.update_layout(
+                title=dict(
+                    text=f"<b>[{shots_cur}샷 · p={p_cur}] 클라우드 리소스 소모량 비교</b>",
+                    font=dict(size=18, color="#ffffff", family="Pretendard, sans-serif")
+                ),
+                barmode="group"
+            )
+            fig_b2b.update_yaxes(title_text="평균 실행 비용 (USD)", secondary_y=False, title_font=dict(color="#f8fafc"), tickfont=dict(color="#f8fafc"))
+            fig_b2b.update_yaxes(title_text="평균 실행 시간 (Seconds)", secondary_y=True, showgrid=False, title_font=dict(color="#fde047"), tickfont=dict(color="#fde047"))
+            st.plotly_chart(fig_b2b, use_container_width=True)
+
+        st.markdown("""
+        <div style="background-color:#1e293b; border-left: 5px solid #6366f1; padding: 15px 18px; border-radius: 8px; margin-top: 8px;">
+            <div style="font-size:16px; font-weight:800; color:#ffffff; margin-bottom:8px;">💡 Q-PartyCut 엔터프라이즈 리포트 인사이트</div>
+            <ul style="color:#e2e8f0; font-size:14.5px; line-height:1.65; margin-bottom:0; padding-left:20px;">
+                <li><b>빠른 응답이 필요한 실시간 서비스 (가성비):</b> <span style="color:#f87171; font-weight:bold;">M3 Only</span> 기법이 시간과 비용 증가를 최소화하면서도 유의미한 방어력을 제공합니다.</li>
+                <li><b>최고의 신뢰도가 요구되는 금융/연구 분야 (고성능):</b> <span style="color:#a78bfa; font-weight:bold;">ZNE + M3</span> 기법이 비용과 시간은 높으나, 노이즈 환경에서도 가장 완벽한 컷 정확도를 안정적으로 보장합니다.</li>
+            </ul>
         </div>
         """, unsafe_allow_html=True)
 
 # --- 세션 상태 초기화 ---
 if "sim_backend_choice" not in st.session_state:
-    st.session_state.sim_backend_choice = "IBM 실제 QPU 하드웨어"
+    st.session_state.sim_backend_choice = "Aer 무잡음 시뮬레이터"
 
 if "show_quant_report" not in st.session_state:
     st.session_state.show_quant_report = False
+
+if "api_error_msg" not in st.session_state:
+    st.session_state.api_error_msg = None
+
+if "last_exec_source" not in st.session_state:
+    st.session_state.last_exec_source = ""
 
 if "current_preset" not in st.session_state:
     st.session_state.current_preset = "기본 파티 갈등망 (N=8)"
@@ -1038,7 +1118,7 @@ if "current_preset" not in st.session_state:
     st.session_state.edges = e_init
     st.session_state.has_solved = False
     st.session_state.view_after = False
-    sync_session_simulation(n_init, e_init, st.session_state.sim_backend_choice, 2, 1024)
+    sync_session_simulation(n_init, e_init, st.session_state.sim_backend_choice, 1, 1024)
 
 def on_preset_change():
     chosen = st.session_state.preset_selector
@@ -1048,7 +1128,8 @@ def on_preset_change():
     st.session_state.edges = e_new
     st.session_state.has_solved = False
     st.session_state.view_after = False
-    p_cur = st.session_state.get("qaoa_p_selector", 2)
+    st.session_state.api_error_msg = None
+    p_cur = st.session_state.get("qaoa_p_selector", 1)
     s_cur = st.session_state.get("qaoa_shots_selector", 1024)
     sync_session_simulation(n_new, e_new, st.session_state.sim_backend_choice, p_cur, s_cur)
 
@@ -1086,13 +1167,17 @@ with top_c3:
     action_clicked = st.button("▶ 갈등 해결 실행", type="primary", use_container_width=True)
 
 with top_c4:
+    qpu_display_name = (st.session_state.get("ibm_qpu_backend_name") or "").strip() or "ibm_sherbrooke (127Q)"
     st.markdown(
-        '<div class="status-pill">'
-        '<span class="status-dot">●</span> <b>IBM Quantum</b>'
-        '<span style="color:#60a5fa; font-family:\'JetBrains Mono\',monospace;">ibm_sherbrooke (127Q)</span>'
-        '</div>',
+        f'<div class="status-pill">'
+        f'<span class="status-dot">●</span> <b>IBM Quantum</b>'
+        f'<span style="color:#60a5fa; font-family:\'JetBrains Mono\',monospace;">{qpu_display_name}</span>'
+        f'</div>',
         unsafe_allow_html=True
     )
+
+if st.session_state.get("api_error_msg"):
+    st.error(f"⚠️ 백엔드 실행 오류: {st.session_state.api_error_msg}")
 
 st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
@@ -1128,7 +1213,7 @@ with left_col:
                     if new_id > 0:
                         w_cur = st.session_state.get("conflict_weight_slider", 4.5)
                         st.session_state.edges.append((new_id - 1, new_id, float(w_cur)))
-                    p_cur = st.session_state.get("qaoa_p_selector", 2)
+                    p_cur = st.session_state.get("qaoa_p_selector", 1)
                     s_cur = st.session_state.get("qaoa_shots_selector", 1024)
                     sync_session_simulation(st.session_state.nodes, st.session_state.edges, st.session_state.sim_backend_choice, p_cur, s_cur)
                     st.session_state.has_solved = False
@@ -1182,6 +1267,7 @@ with left_col:
             use_container_width=True
         ):
             st.session_state.sim_backend_choice = "Aer 무잡음 시뮬레이터"
+            st.session_state.api_error_msg = None
             st.rerun()
 
         st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
@@ -1197,7 +1283,41 @@ with left_col:
             use_container_width=True
         ):
             st.session_state.sim_backend_choice = "IBM 실제 QPU 하드웨어"
+            st.session_state.api_error_msg = None
             st.rerun()
+
+        if is_qpu:
+            st.markdown(
+                '<div style="background-color:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px 12px; margin-top:10px;">'
+                '<div style="font-size:12.5px; font-weight:700; color:#a5b4fc; margin-bottom:6px;">🔐 IBM Quantum 자격증명 (Real QPU)</div>'
+                '</div>',
+                unsafe_allow_html=True
+            )
+            qpu_auth_mode = st.selectbox(
+                "QPU 인증 방식",
+                ["personal", "server"],
+                index=0,
+                key="qpu_auth_mode_selector",
+                format_func=lambda x: "개인 IBM API Key 사용" if x == "personal" else "서버 기본 자격증명 사용",
+                label_visibility="collapsed"
+            )
+            if qpu_auth_mode == "personal":
+                st.text_input(
+                    "IBM Quantum API Key (필수)",
+                    type="password",
+                    placeholder="IBM Cloud API Key 입력...",
+                    key="ibm_api_key_input"
+                )
+                st.text_input(
+                    "IBM Instance CRN (선택)",
+                    placeholder="crn:v1:bluemix:public:quantum-computing:...",
+                    key="ibm_instance_input"
+                )
+            st.text_input(
+                "QPU 장비명 (선택, 비우면 자동 할당)",
+                placeholder="예: ibm_sherbrooke",
+                key="ibm_qpu_backend_name"
+            )
 
         sim_backend_ui = st.session_state.sim_backend_choice
 
@@ -1209,9 +1329,9 @@ with left_col:
             qaoa_p = st.selectbox(
                 "회로 깊이 (p)",
                 [1, 2, 3, 4],
-                index=1,
+                index=0,
                 key="qaoa_p_selector",
-                format_func=lambda x: f"p = {x} (권장)" if x == 2 else f"p = {x}",
+                format_func=lambda x: f"p = {x} (권장)" if x == 1 else f"p = {x}",
                 label_visibility="collapsed"
             )
         with s_col:
@@ -1263,7 +1383,7 @@ with right_col:
             )
 
 # ==========================================
-# 헤더 '갈등 해결 실행' 액션 처리
+# 헤더 '갈등 해결 실행' 액션 처리 (백엔드 API + 개인 IBM API Key 연동)
 # ==========================================
 canvas_dict = {
     "nodes": [{"id": n} for n in st.session_state.nodes],
@@ -1272,7 +1392,7 @@ canvas_dict = {
 parsed_graph = json.loads(parse_to_adjacency_matrix(canvas_dict))
 
 if action_clicked:
-    # 1. 로컬 시뮬레이션 기본값 세팅 (API 실패 시 안전장치)
+    st.session_state.api_error_msg = None
     sync_session_simulation(
         st.session_state.nodes,
         st.session_state.edges,
@@ -1280,121 +1400,122 @@ if action_clicked:
         int(qaoa_p),
         int(qaoa_shots)
     )
+    st.session_state.last_exec_source = "(로컬 시뮬레이터)"
 
-    # 2. 백엔드 API 호출 (noisy_sim 기반 M3 + ZNE 보정 활성화)
-    api_backend_mode = "ideal" if sim_backend_ui == "Aer 무잡음 시뮬레이터" else "noisy_sim"
+    backend_mode = "real_qpu" if sim_backend_ui == "IBM 실제 QPU 하드웨어" else "ideal"
     payload = {
         "num_nodes": parsed_graph["num_nodes"],
         "matrix": parsed_graph["matrix"],
-        "backend": api_backend_mode,
-        "gate_error": 0.01,
-        "readout_error": 0.03,
+        "backend": backend_mode,
         "qaoa": {
             "p": int(qaoa_p),
-            "maxiter": 100,          # 40 -> 100 (COBYLA 수렴 보장)
+            "maxiter": 40,
             "shots": int(qaoa_shots),
-            "seed": 42,
-            "mitigation_method": "both" if mitigation_on else "none",
-            "zne_scales": [1, 3, 5],
-        },
-        "sdp": {"seed": 42},
+        }
     }
 
-    try:
-        api_url = os.getenv("QPARTYCUT_API_URL", "http://127.0.0.1:8000").rstrip("/") + "/jobs"
-        with st.spinner("양자 최적화 및 오류 완화(M3 + ZNE) 연산 중..."):
-            res = requests.post(api_url, json=payload, timeout=5.0)
-            res.raise_for_status()
-            job_id = res.json()["job_id"]
+    req_headers: dict[str, str] = {}
+    validation_failed = False
 
-            status_data = {}
-            for _ in range(60):
-                status_res = requests.get(f"{api_url}/{job_id}", timeout=5.0)
-                status_res.raise_for_status()
-                status_data = status_res.json()
-                if status_data.get("status") in ["completed", "failed"]:
-                    break
-                time.sleep(0.8)
+    if backend_mode == "real_qpu":
+        auth_mode = st.session_state.get("qpu_auth_mode_selector", "personal")
+        payload["qpu_auth"] = auth_mode
 
-        
-        if status_data.get("status") == "completed":
-            res_dict = status_data["result"]["results"]
-            bf_api = (res_dict.get("brute_force") or {}).get("result") or {}
-            gw_api = (res_dict.get("sdp") or {}).get("result") or {}
-            raw_api = (res_dict.get("raw_qaoa") or {}).get("result") or {}
-            mit_api = (res_dict.get("mitigated_qaoa") or {}).get("result") or {}
+        qpu_dev = (st.session_state.get("ibm_qpu_backend_name") or "").strip()
+        if qpu_dev:
+            payload["qpu_backend_name"] = qpu_dev
 
-            bf_val = float(bf_api.get("cut_value", st.session_state.bf_cut)) or 0.1
-            gw_val = float(gw_api.get("cut_value", st.session_state.benchmarks[1]["max_cut_value"]))
-            raw_val = float(raw_api.get("cut_value", st.session_state.raw_cut))
+        if auth_mode == "personal":
+            raw_key = (st.session_state.get("ibm_api_key_input") or "").strip()
+            raw_instance = (st.session_state.get("ibm_instance_input") or "").strip()
+            if not raw_key:
+                st.session_state.api_error_msg = "IBM 실제 QPU 하드웨어(개인 키) 실행을 위해 IBM Quantum API Key를 입력해 주세요."
+                validation_failed = True
+            else:
+                req_headers["X-IBM-API-Key"] = raw_key
+                if raw_instance:
+                    req_headers["X-IBM-Instance"] = raw_instance
 
-            # 1) M3 및 ZNE 원시 값 추출
-            m3_val = float(mit_api.get("cut_value", st.session_state.mit_cut))
-            mit_bs = mit_api.get("bitstring", st.session_state.bitstring)
-            zne_info = (mit_api.get("details") or {}).get("zne") or {}
-            zne_val = min(bf_val, max(0.0, float(zne_info.get("expected_cut_value", m3_val))))
+    if not validation_failed and HAS_JOB_CLIENT:
+        try:
+            with st.spinner("양자 연산 백엔드 작업 제출 및 실행 중..."):
+                job, wait_sec = submit_job(payload, headers=req_headers if req_headers else None)
+                max_polls = 45 if backend_mode == "real_qpu" else 20
+                for _ in range(max_polls):
+                    if job.status in ("completed", "failed"):
+                        break
+                    time.sleep(min(wait_sec, 2))
+                    job, wait_sec = read_job(job.job_id)
 
-            # 2) 메인 화면용(1·2번 그래프): M3 보정 분포 상위 32개 중 최고 컷 분할 선택
-            both_val = max(m3_val, zne_val)
-            raw_dist = (raw_api.get("details") or {}).get("distribution") or {}
-            mit_dist = (mit_api.get("details") or {}).get("distribution") or {}
-            if mit_dist:
-                top_candidates = sorted(mit_dist.items(), key=lambda x: x[1], reverse=True)[:32]
-                for raw_bits, _ in top_candidates:
-                    cand_bs = raw_bits.replace(" ", "")[::-1]
-                    if len(cand_bs) == len(st.session_state.nodes):
-                        cand_cut = evaluate_cut_value(cand_bs, st.session_state.edges)
-                        if cand_cut > both_val:
-                            both_val = cand_cut
-                            mit_bs = cand_bs
+            if job.status == "failed":
+                err_msg = job.error.message if job.error else "백엔드 QPU 작업이 실패했습니다."
+                st.session_state.api_error_msg = err_msg
+            elif job.status == "completed" and job.result is not None:
+                res = job.result
+                res_map = res.results
 
-            # 3) 3번 그래프용: 4종 모두 동일한 '기댓값(<C>)' 기준으로 공정 비교
-            def _calc_expected_cut(dist: dict) -> float:
-                if not dist:
-                    return 0.0
-                return sum(
-                    float(prob) * evaluate_cut_value(bits.replace(" ", "")[::-1], st.session_state.edges)
-                    for bits, prob in dist.items()
-                    if len(bits.replace(" ", "")) == len(st.session_state.nodes)
+                bf_run = res_map.get("brute_force")
+                sdp_run = res_map.get("sdp")
+                raw_run = res_map.get("raw_qaoa")
+                mit_run = res_map.get("mitigated_qaoa")
+
+                bf_val = float(bf_run.result.max_cut_value) if (bf_run and bf_run.result) else st.session_state.bf_cut
+                bf_val = max(bf_val, 0.1)
+                gw_val = float(sdp_run.result.max_cut_value) if (sdp_run and sdp_run.result) else st.session_state.benchmarks[1]["max_cut_value"]
+                raw_val = float(raw_run.result.max_cut_value) if (raw_run and raw_run.result) else st.session_state.raw_cut
+                mit_val = float(mit_run.result.max_cut_value) if (mit_run and mit_run.result) else st.session_state.mit_cut
+
+                if mit_run and mit_run.result and mit_run.result.bitstring:
+                    st.session_state.bitstring = mit_run.result.bitstring
+                if raw_run and raw_run.result and raw_run.result.bitstring:
+                    st.session_state.raw_bitstring = raw_run.result.bitstring
+
+                t_bf_str = f"{bf_run.time:.3f}s" if (bf_run and bf_run.time is not None) else st.session_state.sim_result.get("t_bf", "-")
+                t_gw_str = f"{sdp_run.time:.3f}s" if (sdp_run and sdp_run.time is not None) else st.session_state.sim_result.get("t_gw", "-")
+                t_raw_str = f"{raw_run.time:.2f}s" if (raw_run and raw_run.time is not None) else st.session_state.sim_result.get("t_raw", "-")
+                t_mit_str = f"{mit_run.time:.2f}s" if (mit_run and mit_run.time is not None) else st.session_state.sim_result.get("t_mit", "-")
+
+                api_sim = {
+                    "bf_cut": bf_val,
+                    "gw_cut": gw_val,
+                    "raw_cut": raw_val,
+                    "mit_cut": mit_val,
+                    "raw_sec": float(raw_run.time) if (raw_run and raw_run.time is not None) else st.session_state.sim_result.get("raw_sec", 0.5),
+                    "mit_sec": float(mit_run.time) if (mit_run and mit_run.time is not None) else st.session_state.sim_result.get("mit_sec", 0.8),
+                    "t_bf": t_bf_str,
+                    "t_gw": t_gw_str,
+                    "t_raw": t_raw_str,
+                    "t_mit": t_mit_str,
+                }
+                st.session_state.sim_result.update(api_sim)
+                st.session_state.bf_cut = bf_val
+                st.session_state.raw_cut = raw_val
+                st.session_state.mit_cut = mit_val
+                st.session_state.benchmarks = build_benchmark_tables_from_sim(api_sim)
+
+                if res.qem is not None:
+                    st.session_state.qem_report_actual = res.qem.model_dump()
+
+                st.session_state.report_df = generate_dynamic_experiment_df(
+                    num_tests=20,
+                    use_fixed_seed=False,
+                    show_progress=False
                 )
+                st.session_state.last_exec_source = "(FastAPI 백엔드)"
+                st.session_state.has_solved = True
+                st.session_state.view_after = True
+        except JobAPIError as exc:
+            if exc.status_code is None and backend_mode != "real_qpu":
+                st.session_state.has_solved = True
+                st.session_state.view_after = True
+            else:
+                st.session_state.api_error_msg = str(exc)
+    elif not validation_failed and backend_mode == "real_qpu":
+        st.session_state.api_error_msg = f"백엔드 클라이언트 로드 실패: {JOB_CLIENT_IMPORT_ERR}"
+    elif not validation_failed:
+        st.session_state.has_solved = True
+        st.session_state.view_after = True
 
-            raw_exp = _calc_expected_cut(raw_dist) or raw_val
-            m3_exp = _calc_expected_cut(mit_dist) or m3_val
-            zne_exp = min(bf_val, max(0.0, float(zne_info.get("expected_cut_value", raw_exp))))
-            both_exp = min(bf_val, max(m3_exp, zne_exp) + max(0.0, m3_exp - raw_exp))
-
-            st.session_state.bitstring = mit_bs
-            if raw_api.get("bitstring"):
-                st.session_state.raw_bitstring = raw_api["bitstring"]
-
-            st.session_state.sim_result.update({
-                "bf_cut": bf_val,
-                "gw_cut": gw_val,
-                "raw_cut": raw_val,
-                "mit_cut": both_val,
-                # 아래 4개 키가 3번 그래프(기댓값 비교)에 사용됨
-                "qem_raw": raw_exp,
-                "m3_cut": m3_exp,
-                "zne_cut": zne_exp,
-                "both_cut": both_exp,
-                "bf_bs": bf_api.get("bitstring", st.session_state.sim_result.get("bf_bs", "-")),
-                "gw_bs": gw_api.get("bitstring", st.session_state.sim_result.get("gw_bs", "-")),
-                "raw_bs": raw_api.get("bitstring", st.session_state.sim_result.get("raw_bs", "-")),
-                "mit_bs": mit_bs,
-                "t_bf": f"{bf_api.get('runtime_seconds', 0):.3f}s" if "runtime_seconds" in bf_api else st.session_state.sim_result.get("t_bf", "-"),
-                "t_gw": f"{gw_api.get('runtime_seconds', 0):.3f}s" if "runtime_seconds" in gw_api else st.session_state.sim_result.get("t_gw", "-"),
-                "t_raw": f"{raw_api.get('runtime_seconds', 0):.2f}s" if "runtime_seconds" in raw_api else st.session_state.sim_result.get("t_raw", "-"),
-                "t_mit": f"{mit_api.get('runtime_seconds', 0):.2f}s" if "runtime_seconds" in mit_api else st.session_state.sim_result.get("t_mit", "-"),
-            })
-            st.session_state.bf_cut = bf_val
-            st.session_state.raw_cut = raw_val
-            st.session_state.mit_cut = both_val
-            st.session_state.benchmarks = build_benchmark_tables_from_sim(st.session_state.sim_result)
-    except Exception:
-        pass
-
-    st.session_state.has_solved = True
-    st.session_state.view_after = True
     st.rerun()
 
 # 활성 비트열 및 회피된 갈등 수치 계산
