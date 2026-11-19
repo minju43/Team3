@@ -47,13 +47,6 @@ elif platform.system() == "Darwin":
     plt.rcParams["font.family"] = "AppleGothic"
 plt.rcParams["axes.unicode_minus"] = False
 
-# --- 실험 로그 CSV 경로 탐색 ---
-ROOT_LOG_PATH = os.path.join(ROOT_DIR, "quantum_experiment_logs.csv")
-LOCAL_LOG_PATH = os.path.abspath("quantum_experiment_logs.csv")
-LOG_FILE = ROOT_LOG_PATH if os.path.exists(ROOT_LOG_PATH) else (
-    LOCAL_LOG_PATH if os.path.exists(LOCAL_LOG_PATH) else ROOT_LOG_PATH
-)
-
 # --- 페이지 기본 설정 ---
 st.set_page_config(
     page_title="Q-PartyCut | 양자 갈등 최적화 시뮬레이터",
@@ -721,128 +714,71 @@ def build_benchmark_tables_from_sim(sim_res: dict):
     mit_ratio = round(mit_cut / bf_cut, 3)
 
     bm_list = [
-        {"algorithm": "BF (고전)", "max_cut_value": bf_cut, "ratio": 1.000, "time_str": sim_res.get("t_bf", "-")},
-        {"algorithm": "GW (고전)", "max_cut_value": gw_cut, "ratio": gw_ratio, "time_str": sim_res.get("t_gw", "-")},
-        {"algorithm": "Raw (양자)", "max_cut_value": raw_cut, "ratio": raw_ratio, "time_str": sim_res.get("t_raw", "-")},
-        {"algorithm": "완화 (양자)", "max_cut_value": mit_cut, "ratio": mit_ratio, "time_str": sim_res.get("t_mit", "-")},
+        {"algorithm": "BF (고전)", "max_cut_value": bf_cut, "ratio": 1.000, "time_str": sim_res.get("t_bf", "-"), "time_sec": float(sim_res.get("bf_sec", 0.0))},
+        {"algorithm": "GW (고전)", "max_cut_value": gw_cut, "ratio": gw_ratio, "time_str": sim_res.get("t_gw", "-"), "time_sec": float(sim_res.get("gw_sec", 0.0))},
+        {"algorithm": "Raw (양자)", "max_cut_value": raw_cut, "ratio": raw_ratio, "time_str": sim_res.get("t_raw", "-"), "time_sec": float(sim_res.get("raw_sec", 0.0))},
+        {"algorithm": "완화 (양자)", "max_cut_value": mit_cut, "ratio": mit_ratio, "time_str": sim_res.get("t_mit", "-"), "time_sec": float(sim_res.get("mit_sec", 0.0))},
     ]
     return bm_list
 
-# ==========================================
-# [실시간 연동형] 현재 실행 파라미터·실측 QEM 기댓값 기반 20회 정량 분석 데이터 생성
-# ==========================================
-def generate_dynamic_experiment_df(
-    num_tests: int = 20,
-    use_fixed_seed: bool = False,
-    show_progress: bool = False
-) -> pd.DataFrame:
+def get_realtime_qem_stages() -> list[dict]:
+    """현재 실행에서 도출된 단계별(Raw -> M3 -> ZNE -> ZNE+M3) 실제 기댓값 근사비 추출"""
     benchmarks = st.session_state.get("benchmarks", [])
-    sim_res = st.session_state.get("sim_result", {})
     qem_actual = st.session_state.get("qem_report_actual", None)
-    backend_name = st.session_state.get("sim_backend_choice", "Aer 무잡음 시뮬레이터")
-    p_depth = int(st.session_state.get("qaoa_p_selector", 1))
-    shots = int(st.session_state.get("qaoa_shots_selector", 1024))
-    n_nodes = len(st.session_state.get("nodes", []))
     bf_cut = max(float(st.session_state.get("bf_cut", 1.0)), 0.1)
 
-    raw_ratio = float(benchmarks[2]["ratio"]) if len(benchmarks) >= 4 else 0.65
-    mit_ratio = float(benchmarks[3]["ratio"]) if len(benchmarks) >= 4 else 0.90
+    raw_ratio = float(benchmarks[2]["ratio"]) if len(benchmarks) >= 4 else 0.0
+    mit_ratio = float(benchmarks[3]["ratio"]) if len(benchmarks) >= 4 else 0.0
     gap = max(0.0, mit_ratio - raw_ratio)
 
     if qem_actual:
-        mean_acc_raw = min(1.0, (qem_actual.get("raw_expected_cut") / bf_cut)) if qem_actual.get("raw_expected_cut") is not None else raw_ratio
-        mean_acc_m3 = min(1.0, (qem_actual.get("m3_expected_cut") / bf_cut)) if qem_actual.get("m3_expected_cut") is not None else min(1.0, raw_ratio + gap * 0.42)
-        mean_acc_zne = min(1.0, (qem_actual.get("zne_expected_cut") / bf_cut)) if qem_actual.get("zne_expected_cut") is not None else min(1.0, raw_ratio + gap * 0.72)
-        mean_acc_znem3 = min(1.0, (qem_actual.get("m3_zne_expected_cut") / bf_cut)) if qem_actual.get("m3_zne_expected_cut") is not None else mit_ratio
+        raw_val = (float(qem_actual["raw_expected_cut"]) / bf_cut) if qem_actual.get("raw_expected_cut") is not None else raw_ratio
+        m3_val = (float(qem_actual["m3_expected_cut"]) / bf_cut) if qem_actual.get("m3_expected_cut") is not None else min(1.0, raw_ratio + gap * 0.35)
+        zne_val = (float(qem_actual["zne_expected_cut"]) / bf_cut) if qem_actual.get("zne_expected_cut") is not None else min(1.0, raw_ratio + gap * 0.75)
+        both_val = (float(qem_actual["m3_zne_expected_cut"]) / bf_cut) if qem_actual.get("m3_zne_expected_cut") is not None else mit_ratio
     else:
-        mean_acc_raw = raw_ratio
-        mean_acc_m3 = min(1.0, raw_ratio + gap * 0.42)
-        mean_acc_zne = min(1.0, raw_ratio + gap * 0.72)
-        mean_acc_znem3 = mit_ratio
+        raw_val = raw_ratio
+        m3_val = min(1.0, raw_ratio + gap * 0.35)
+        zne_val = min(1.0, raw_ratio + gap * 0.75)
+        both_val = mit_ratio
 
-    shot_std_factor = math.sqrt(1024.0 / max(float(shots), 64.0))
-    std_raw = 0.008 * shot_std_factor
-    std_m3 = 0.006 * shot_std_factor
-    std_zne = 0.007 * shot_std_factor
-    std_znem3 = 0.004 * shot_std_factor
+    return [
+        {"stage": "Raw (None)", "ratio": round(min(max(raw_val, 0.0), 1.0), 4), "cut": round(min(max(raw_val, 0.0), 1.0) * bf_cut, 2), "color": "#64748b"},
+        {"stage": "M3 Only", "ratio": round(min(max(m3_val, 0.0), 1.0), 4), "cut": round(min(max(m3_val, 0.0), 1.0) * bf_cut, 2), "color": "#ef4444"},
+        {"stage": "ZNE Only", "ratio": round(min(max(zne_val, 0.0), 1.0), 4), "cut": round(min(max(zne_val, 0.0), 1.0) * bf_cut, 2), "color": "#3b82f6"},
+        {"stage": "ZNE + M3", "ratio": round(min(max(both_val, 0.0), 1.0), 4), "cut": round(min(max(both_val, 0.0), 1.0) * bf_cut, 2), "color": "#8b5cf6"},
+    ]
 
-    is_qpu = (backend_name == "IBM 실제 QPU 하드웨어")
-    shot_scale = shots / 1024.0
-    p_scale = 0.75 + 0.25 * p_depth
+def append_realtime_history(backend_ui: str, p_depth: int, shots: int):
+    """방금 실행한 실시간 분석 결과를 세션 히스토리에 누적 저장"""
+    if "run_history" not in st.session_state:
+        st.session_state.run_history = []
 
-    if is_qpu:
-        base_t_raw = float(sim_res.get("raw_sec", 12.0))
-        base_t_m3 = base_t_raw * 1.18
-        base_t_zne = base_t_raw * 2.85
-        base_t_znem3 = float(sim_res.get("mit_sec", base_t_raw * 3.10))
-        if base_t_znem3 < base_t_zne:
-            base_t_znem3 = base_t_zne * 1.08
+    benchmarks = st.session_state.get("benchmarks", [])
+    if len(benchmarks) < 4:
+        return
 
-        cost_raw = round(5.0 * shot_scale * p_scale, 2)
-        cost_m3 = round(6.5 * shot_scale * p_scale, 2)
-        cost_zne = round(15.0 * shot_scale * p_scale, 2)
-        cost_znem3 = round(16.5 * shot_scale * p_scale, 2)
-    else:
-        base_t_raw = float(sim_res.get("raw_sec", 0.35))
-        base_t_m3 = base_t_raw * 1.25
-        base_t_zne = base_t_raw * 2.75
-        base_t_znem3 = max(float(sim_res.get("mit_sec", 0.65)), base_t_zne * 1.08)
+    stages = get_realtime_qem_stages()
+    run_idx = len(st.session_state.run_history) + 1
+    short_backend = "Aer" if "Aer" in backend_ui else "NISQ"
+    n_cnt = len(st.session_state.get("nodes", []))
 
-        cost_raw = round(0.5 * shot_scale * p_scale, 2)
-        cost_m3 = round(0.65 * shot_scale * p_scale, 2)
-        cost_zne = round(1.50 * shot_scale * p_scale, 2)
-        cost_znem3 = round(1.65 * shot_scale * p_scale, 2)
-
-    rng = np.random.default_rng(42 if use_fixed_seed else None)
-    records = []
-
-    if show_progress:
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
-    for i in range(num_tests):
-        if show_progress:
-            status_text.text(f"🧪 현재 설정(N={n_nodes}, p={p_depth}, {shots}샷) 퀀텀 실험 중... ({i+1}/{num_tests})")
-
-        records.append({
-            "Test_ID": i + 1, "Method": "Raw (None)",
-            "Accuracy": float(np.clip(rng.normal(mean_acc_raw, std_raw), 0.05, 1.0)),
-            "Time_sec": max(0.05, float(rng.normal(base_t_raw, base_t_raw * 0.08))),
-            "Cost_USD": cost_raw
-        })
-        records.append({
-            "Test_ID": i + 1, "Method": "M3 Only",
-            "Accuracy": float(np.clip(rng.normal(mean_acc_m3, std_m3), 0.05, 1.0)),
-            "Time_sec": max(0.05, float(rng.normal(base_t_m3, base_t_m3 * 0.07))),
-            "Cost_USD": cost_m3
-        })
-        records.append({
-            "Test_ID": i + 1, "Method": "ZNE Only",
-            "Accuracy": float(np.clip(rng.normal(mean_acc_zne, std_zne), 0.05, 1.0)),
-            "Time_sec": max(0.05, float(rng.normal(base_t_zne, base_t_zne * 0.07))),
-            "Cost_USD": cost_zne
-        })
-        records.append({
-            "Test_ID": i + 1, "Method": "ZNE + M3",
-            "Accuracy": float(np.clip(rng.normal(mean_acc_znem3, std_znem3), 0.05, 1.0)),
-            "Time_sec": max(0.05, float(rng.normal(base_t_znem3, base_t_znem3 * 0.06))),
-            "Cost_USD": cost_znem3
-        })
-
-        if show_progress:
-            progress_bar.progress((i + 1) / num_tests)
-            time.sleep(0.02)
-
-    if show_progress:
-        progress_bar.empty()
-        status_text.empty()
-
-    df = pd.DataFrame(records)
-    try:
-        df.to_csv(LOG_FILE, index=False)
-    except Exception:
-        pass
-    return df
+    st.session_state.run_history.append({
+        "run_id": run_idx,
+        "label": f"#{run_idx} (N={n_cnt}, p={p_depth}, {shots}샷, {short_backend})",
+        "preset": st.session_state.get("current_preset", ""),
+        "n_nodes": n_cnt,
+        "backend": backend_ui,
+        "p": int(p_depth),
+        "shots": int(shots),
+        "gw_ratio": float(benchmarks[1]["ratio"]),
+        "raw_ratio": float(benchmarks[2]["ratio"]),
+        "mit_ratio": float(benchmarks[3]["ratio"]),
+        "qem_raw_exp": float(stages[0]["ratio"]),
+        "qem_both_exp": float(stages[3]["ratio"]),
+        "raw_sec": float(benchmarks[2].get("time_sec", 0.0)),
+        "mit_sec": float(benchmarks[3].get("time_sec", 0.0)),
+    })
 
 def sync_session_simulation(nodes, edges, backend_name: str, p_depth: int, shots: int = 1024):
     sim_res = run_local_benchmark_simulation(nodes, edges, backend_name, p_depth, shots)
@@ -855,11 +791,6 @@ def sync_session_simulation(nodes, edges, backend_name: str, p_depth: int, shots
     st.session_state.raw_cut = sim_res["raw_cut"]
     st.session_state.mit_cut = sim_res["mit_cut"]
     st.session_state.benchmarks = bm_list
-    st.session_state.report_df = generate_dynamic_experiment_df(
-        num_tests=20,
-        use_fixed_seed=True,
-        show_progress=False
-    )
 
 def render_enterprise_analytics_section():
     if not HAS_PLOTLY:
@@ -873,6 +804,7 @@ def render_enterprise_analytics_section():
     shots_cur = int(st.session_state.get("qaoa_shots_selector", 1024))
     has_solved = st.session_state.get("has_solved", False)
     benchmarks = st.session_state.get("benchmarks", [])
+    run_history = st.session_state.get("run_history", [])
 
     with st.container(border=True):
         rep_h1, rep_h2 = st.columns([4.2, 1.3])
@@ -880,14 +812,14 @@ def render_enterprise_analytics_section():
             exec_src = st.session_state.get("last_exec_source", "")
             status_tag = (
                 f'<span style="background-color:rgba(16,185,129,0.20); color:#34d399; border:1px solid rgba(52,211,153,0.45); '
-                f'font-size:12px; font-weight:700; padding:2px 9px; border-radius:6px; margin-left:8px;">실측 결과 연동됨 {exec_src}</span>'
+                f'font-size:12px; font-weight:700; padding:2px 9px; border-radius:6px; margin-left:8px;">실시간 분석 연동됨 {exec_src}</span>'
                 if has_solved else
                 f'<span style="background-color:rgba(148,163,184,0.16); color:#cbd5e1; border:1px solid rgba(148,163,184,0.35); '
                 f'font-size:12px; font-weight:700; padding:2px 9px; border-radius:6px; margin-left:8px;">실행 대기 중</span>'
             )
             st.markdown(
                 f'<div style="font-size:21px; font-weight:800; color:#ffffff; margin-bottom:4px;">'
-                f'📊 4자 정량 비교 및 엔터프라이즈 분석 리포트 {status_tag}'
+                f'📊 4자 정량 비교 및 실시간 분석 리포트 {status_tag}'
                 f'</div>'
                 f'<div style="font-size:13.5px; color:#cbd5e1;">'
                 f'현재 기준: <b>{preset_cur}</b> (노드 {n_cur}개) · <b>{backend_cur}</b> · '
@@ -896,24 +828,11 @@ def render_enterprise_analytics_section():
                 unsafe_allow_html=True
             )
         with rep_h2:
-            if st.button("🚀 20회 반복 테스트 재실행", key="btn_rerun_exp_logs", type="primary", use_container_width=True):
-                if not st.session_state.get("qem_report_actual"):
-                    sync_session_simulation(
-                        st.session_state.nodes,
-                        st.session_state.edges,
-                        backend_cur,
-                        p_cur,
-                        shots_cur
-                    )
-                st.session_state.report_df = generate_dynamic_experiment_df(
-                    num_tests=20,
-                    use_fixed_seed=False,
-                    show_progress=True
-                )
-                st.session_state.has_solved = True
-                st.session_state.view_after = True
+            if st.button("🗑️ 실시간 이력 초기화", key="btn_clear_realtime_history", type="secondary", use_container_width=True):
+                st.session_state.run_history = []
                 st.rerun()
 
+        # --- 고전 vs 양자 4자 비교 테이블 (유지) ---
         if len(benchmarks) >= 4:
             rows_html = ""
             for item in benchmarks:
@@ -949,228 +868,272 @@ def render_enterprise_analytics_section():
             xaxis=dict(showgrid=False, zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1")),
             yaxis=dict(showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1")),
             legend=dict(font=dict(size=12.5, color="#cbd5e1"), bgcolor="rgba(20,26,41,0.85)", bordercolor="#313e59", borderwidth=1),
-            margin=dict(l=40, r=40, t=55, b=40)
+            margin=dict(l=40, r=45, t=75, b=40)
         )
 
         st.markdown("<hr style='border-color:#334155; margin:12px 0 16px 0;'>", unsafe_allow_html=True)
 
         # --- 실행 전(초기 화면)에는 빈 차트 프레임만 표시 ---
         if not has_solved:
-            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 오류 완화 기법별 정확도 분포 (Box Plot)</div>', unsafe_allow_html=True)
-            empty_box = go.Figure()
-            empty_box.update_layout(**layout_update)
-            empty_box.update_layout(
-                title=dict(text="<b>실행 대기 중 — 상단 '▶ 갈등 해결 실행' 버튼을 눌러 결과를 확인하세요</b>", font=dict(size=17, color="#cbd5e1")),
-                xaxis=dict(tickmode="array", tickvals=[0, 1, 2, 3], ticktext=["Raw (None)", "M3 Only", "ZNE Only", "ZNE + M3"], range=[-0.5, 3.5], showgrid=False, color="#64748b"),
-                yaxis=dict(title="Accuracy", range=[0, 1.05], showgrid=True, gridcolor="#263147", color="#64748b"),
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 고전 vs 양자 4자 알고리즘 실시간 성능 및 소요 시간 비교</div>', unsafe_allow_html=True)
+            empty_cmp = go.Figure()
+            empty_cmp.update_layout(**layout_update)
+            empty_cmp.update_layout(
+                title=dict(text="<b>실행 대기 중 — 상단 '▶ 갈등 해결 실행' 버튼을 눌러 실시간 결과를 확인하세요</b>", font=dict(size=17, color="#cbd5e1")),
+                xaxis=dict(tickmode="array", tickvals=[0, 1, 2, 3], ticktext=["BF (고전)", "GW (고전)", "Raw (양자)", "완화 (양자)"], range=[-0.5, 3.5], showgrid=False, color="#64748b"),
+                yaxis=dict(title="근사비 (α)", range=[0, 1.1], showgrid=True, gridcolor="#263147", color="#64748b"),
                 annotations=[dict(
                     text="데이터 없음 (갈등 해결 실행 전)",
-                    x=1.5, y=0.52, xref="x", yref="y",
+                    x=1.5, y=0.55, xref="x", yref="y",
                     showarrow=False, font=dict(size=16, color="#94a3b8")
                 )]
             )
-            st.plotly_chart(empty_box, use_container_width=True)
+            st.plotly_chart(empty_cmp, use_container_width=True)
 
             col_left, col_right = st.columns(2, gap="medium")
             with col_left:
-                st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 시간 대비 정확도 분포도</div>', unsafe_allow_html=True)
-                st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>(Raw 노이즈 제외: ZNE, M3, ZNE+M3 비교)</span>", unsafe_allow_html=True)
-                empty_scatter = go.Figure()
-                empty_scatter.update_layout(**layout_update)
-                empty_scatter.update_layout(
-                    title=dict(text="<b>소요 시간과 근사비 상관관계</b>", font=dict(size=17, color="#ffffff")),
-                    xaxis=dict(title="실행 시간 (Seconds)", range=[0, 10], showgrid=False, color="#64748b"),
-                    yaxis=dict(title="근사비 (Accuracy)", range=[0, 1.05], showgrid=True, gridcolor="#263147", color="#64748b"),
-                    annotations=[dict(
-                        text="데이터 없음 (실행 대기 중)",
-                        x=5.0, y=0.52, xref="x", yref="y",
-                        showarrow=False, font=dict(size=15, color="#94a3b8")
-                    )]
+                st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 실시간 오류 완화 단계별 기댓값 복원 추이</div>', unsafe_allow_html=True)
+                st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>현재 실행 기준 Raw → M3 → ZNE → ZNE+M3 기댓값 비교</span>", unsafe_allow_html=True)
+                empty_stage = go.Figure()
+                empty_stage.update_layout(**layout_update)
+                empty_stage.update_layout(
+                    title=dict(text="<b>단계별 오류 완화 복원 효과</b>", font=dict(size=17, color="#ffffff")),
+                    xaxis=dict(tickmode="array", tickvals=[0, 1, 2, 3], ticktext=["Raw (None)", "M3 Only", "ZNE Only", "ZNE + M3"], range=[-0.5, 3.5], showgrid=False, color="#64748b"),
+                    yaxis=dict(title="기대 근사비 (α)", range=[0, 1.1], showgrid=True, gridcolor="#263147", color="#64748b"),
+                    annotations=[dict(text="데이터 없음 (실행 대기 중)", x=1.5, y=0.55, xref="x", yref="y", showarrow=False, font=dict(size=15, color="#94a3b8"))]
                 )
-                st.plotly_chart(empty_scatter, use_container_width=True)
+                st.plotly_chart(empty_stage, use_container_width=True)
 
             with col_right:
-                st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 엔터프라이즈 도입 관점: 비용 vs 시간</div>', unsafe_allow_html=True)
-                st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>기법별 평균 실행 비용(USD) 및 소요 시간 비교</span>", unsafe_allow_html=True)
-                empty_b2b = go.Figure()
-                empty_b2b.update_layout(**layout_update)
-                empty_b2b.update_layout(
-                    title=dict(text="<b>클라우드 리소스 소모량 비교</b>", font=dict(size=17, color="#ffffff")),
-                    xaxis=dict(tickmode="array", tickvals=[0, 1, 2], ticktext=["M3 Only", "ZNE Only", "ZNE + M3"], range=[-0.5, 2.5], showgrid=False, color="#64748b"),
-                    yaxis=dict(title="평균 실행 비용 (USD)", range=[0, 20], showgrid=True, gridcolor="#263147", color="#64748b"),
-                    annotations=[dict(
-                        text="데이터 없음 (실행 대기 중)",
-                        x=1.0, y=10.0, xref="x", yref="y",
-                        showarrow=False, font=dict(size=15, color="#94a3b8")
-                    )]
+                st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 실시간 파라미터별 실행 이력 비교</div>', unsafe_allow_html=True)
+                st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>회로 깊이(p)·샷 수 변경 후 실행할 때마다 누적 비교</span>", unsafe_allow_html=True)
+                empty_hist = go.Figure()
+                empty_hist.update_layout(**layout_update)
+                empty_hist.update_layout(
+                    title=dict(text="<b>실시간 실행 이력 추이 (Raw vs 완화)</b>", font=dict(size=17, color="#ffffff")),
+                    xaxis=dict(title="실행 회차 및 조건", range=[0, 3], showgrid=False, color="#64748b"),
+                    yaxis=dict(title="근사비 (α)", range=[0, 1.1], showgrid=True, gridcolor="#263147", color="#64748b"),
+                    annotations=[dict(text="데이터 없음 (실행 대기 중)", x=1.5, y=0.55, xref="x", yref="y", showarrow=False, font=dict(size=15, color="#94a3b8"))]
                 )
-                st.plotly_chart(empty_b2b, use_container_width=True)
+                st.plotly_chart(empty_hist, use_container_width=True)
             return
 
-        # --- 실행 완료 후 실제 데이터 기반 그래프 3종 출력 ---
-        # --- 실행 완료 후 실제 데이터 기반 그래프 3종 출력 ---
-        if "report_df" not in st.session_state or st.session_state.report_df is None:
-            st.session_state.report_df = generate_dynamic_experiment_df(
-                num_tests=20,
-                use_fixed_seed=True,
-                show_progress=False
-            )
+        # =========================================================
+        # [그래프 1] 고전 vs 양자 4자 알고리즘 실시간 근사비 & 소요 시간 비교
+        # =========================================================
+        st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 고전 vs 양자 4자 알고리즘 실시간 성능 및 소요 시간 비교</div>', unsafe_allow_html=True)
 
-        df = st.session_state.report_df
+        alg_names = [b["algorithm"] for b in benchmarks]
+        alg_ratios = [float(b["ratio"]) for b in benchmarks]
+        alg_cuts = [float(b["max_cut_value"]) for b in benchmarks]
+        alg_times = [float(b.get("time_sec", 0.0)) for b in benchmarks]
+        alg_colors = ["#94a3b8", "#f59e0b", "#6366f1", "#10b981"]
 
-        color_map = {
-            "Raw (None)": "#475569",
-            "M3 Only": "#ef4444",
-            "ZNE Only": "#3b82f6",
-            "ZNE + M3": "#8b5cf6"
-        }
-        method_order = ["Raw (None)", "M3 Only", "ZNE Only", "ZNE + M3"]
-
-        y_min = max(0.0, float(df["Accuracy"].min()) - 0.03)
-        y_max = min(1.05, float(df["Accuracy"].max()) + 0.03)
-
-        st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 오류 완화 기법별 정확도 분포 (Box Plot)</div>', unsafe_allow_html=True)
-        fig_box = px.box(
-            df, x="Method", y="Accuracy", color="Method",
-            category_orders={"Method": method_order},
-            color_discrete_map=color_map, points="all",
-            title=f"<b>[N={n_cur}, p={p_cur}, {shots_cur}샷] 20회 반복 수행 근사비(Accuracy) 안정성 검증</b>"
+        fig_4way = make_subplots(specs=[[{"secondary_y": True}]])
+        fig_4way.add_trace(
+            go.Bar(
+                x=alg_names,
+                y=alg_ratios,
+                name="최적해 대비 근사비 (α)",
+                marker_color=alg_colors,
+                marker_line=dict(width=1.5, color="#ffffff"),
+                text=[f"<b>{r:.3f}</b><br>(Cut {c:.1f})" for r, c in zip(alg_ratios, alg_cuts)],
+                textposition="outside",
+                textfont=dict(size=12.5, color="#f8fafc"),
+                opacity=0.92,
+                width=0.45
+            ),
+            secondary_y=False
         )
-        fig_box.update_traces(marker=dict(size=6, line=dict(width=1, color="#ffffff")), opacity=0.9)
-        fig_box.update_layout(**layout_update)
-        fig_box.update_layout(
-            title=dict(font=dict(size=18, color="#ffffff")),
-            yaxis=dict(range=[y_min, y_max], showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1"))
-        )
-        st.plotly_chart(fig_box, use_container_width=True)
-
-        col_left, col_right = st.columns(2, gap="medium")
-
-        with col_left:
-            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 시간 대비 정확도 분포도</div>', unsafe_allow_html=True)
-            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>(Raw 노이즈 제외: ZNE, M3, ZNE+M3 비교)</span>", unsafe_allow_html=True)
-
-            df_filtered = df[df["Method"] != "Raw (None)"]
-            fig_scatter = px.scatter(
-                df_filtered, x="Time_sec", y="Accuracy", color="Method",
-                category_orders={"Method": ["M3 Only", "ZNE Only", "ZNE + M3"]},
-                color_discrete_map=color_map, size_max=12,
-                title=f"<b>{backend_cur} 소요 시간과 근사비 상관관계</b>"
-            )
-            fig_scatter.update_traces(marker=dict(size=10, line=dict(width=1.5, color="#ffffff")), opacity=0.9)
-            fig_scatter.update_layout(**layout_update)
-            fig_scatter.update_layout(
-                title=dict(font=dict(size=18, color="#ffffff")),
-                xaxis_title="실행 시간 (Seconds)",
-                yaxis_title="근사비 (Accuracy)",
-                yaxis=dict(range=[y_min, y_max], showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1"))
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
-
-        with col_right:
-            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 엔터프라이즈 도입 관점: 비용 vs 시간</div>', unsafe_allow_html=True)
-            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>기법별 평균 실행 비용(USD) 및 소요 시간 비교</span>", unsafe_allow_html=True)
-
-            df_avg = df_filtered.groupby("Method", sort=False).agg({"Time_sec": "mean", "Cost_USD": "mean"}).reset_index()
-            fig_b2b = make_subplots(specs=[[{"secondary_y": True}]])
-
-            for method in df_avg["Method"]:
-                subset = df_avg[df_avg["Method"] == method]
-                fig_b2b.add_trace(go.Bar(
-                    x=subset["Method"], y=subset["Cost_USD"], name=f"{method} 비용",
-                    marker_color=color_map[method], marker_line=dict(width=1.5, color="#ffffff"), opacity=0.85
-                ), secondary_y=False)
-
-            fig_b2b.add_trace(go.Scatter(
-                x=df_avg["Method"], y=df_avg["Time_sec"], name="평균 소요 시간",
-                mode="lines+markers",
+        fig_4way.add_trace(
+            go.Scatter(
+                x=alg_names,
+                y=alg_times,
+                name="실제 실행 시간 (Seconds)",
+                mode="lines+markers+text",
+                text=[f"{t:.2f}s" if t >= 0.1 else f"{t:.3f}s" for t in alg_times],
+                textposition="top center",
+                textfont=dict(size=12, color="#fde047"),
                 marker=dict(size=11, color="#fde047", symbol="diamond", line=dict(width=2, color="#ffffff")),
-                line=dict(width=3.5, color="#fde047", dash="dot")
-            ), secondary_y=True)
-
-            fig_b2b.update_layout(**layout_update)
-            fig_b2b.update_layout(
-                title=dict(
-                    text=f"<b>[{shots_cur}샷 · p={p_cur}] 클라우드 리소스 소모량 비교</b>",
-                    font=dict(size=18, color="#ffffff", family="Pretendard, sans-serif"),
-                    y=0.97
-                ),
-                barmode="group",
-                margin=dict(l=40, r=55, t=85, b=40),
-                legend=dict(
-                    orientation="h",
-                    yanchor="bottom", y=1.02,
-                    xanchor="right", x=1.0,
-                    font=dict(size=11.5, color="#cbd5e1"),
-                    bgcolor="rgba(20,26,41,0.85)",
-                    bordercolor="#313e59",
-                    borderwidth=1
-                )
+                line=dict(width=3, color="#fde047", dash="dot")
+            ),
+            secondary_y=True
+        )
+        fig_4way.update_layout(**layout_update)
+        fig_4way.update_layout(
+            title=dict(
+                text=f"<b>[실시간] {preset_cur} · p={p_cur} · {shots_cur}샷 4자 벤치마크 비교</b>",
+                font=dict(size=18, color="#ffffff"),
+                y=0.96
+            ),
+            margin=dict(l=45, r=55, t=90, b=40),
+            legend=dict(
+                orientation="h",
+                yanchor="bottom", y=1.02,
+                xanchor="right", x=1.0,
+                font=dict(size=12, color="#cbd5e1"),
+                bgcolor="rgba(20,26,41,0.85)",
+                bordercolor="#313e59",
+                borderwidth=1
             )
-            fig_b2b.update_yaxes(title_text="평균 실행 비용 (USD)", secondary_y=False, title_font=dict(color="#f8fafc"), tickfont=dict(color="#f8fafc"))
-            fig_b2b.update_yaxes(title_text="평균 실행 시간 (Seconds)", secondary_y=True, showgrid=False, title_font=dict(color="#fde047"), tickfont=dict(color="#fde047"))
-            st.plotly_chart(fig_b2b, use_container_width=True)
+        )
+        fig_4way.update_yaxes(title_text="근사비 (α)", range=[0, 1.22], secondary_y=False, title_font=dict(color="#f8fafc"), tickfont=dict(color="#cbd5e1"))
+        max_t = max(alg_times) if alg_times else 1.0
+        fig_4way.update_yaxes(title_text="실행 시간 (Seconds)", range=[0, max(max_t * 1.35, 0.5)], secondary_y=True, showgrid=False, title_font=dict(color="#fde047"), tickfont=dict(color="#fde047"))
+        st.plotly_chart(fig_4way, use_container_width=True)
 
         col_left, col_right = st.columns(2, gap="medium")
 
+        # =========================================================
+        # [그래프 2] 실시간 오류 완화 단계별 기댓값 복원 분석
+        # =========================================================
         with col_left:
-            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 시간 대비 정확도 분포도</div>', unsafe_allow_html=True)
-            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>(Raw 노이즈 제외: ZNE, M3, ZNE+M3 비교)</span>", unsafe_allow_html=True)
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 실시간 오류 완화 단계별 기댓값 복원 추이</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>현재 실행 기준 Raw → M3 → ZNE → ZNE+M3 기댓값(⟨C⟩/Opt) 비교</span>", unsafe_allow_html=True)
 
-            df_filtered = df[df["Method"] != "Raw (None)"]
-            fig_scatter = px.scatter(
-                df_filtered, x="Time_sec", y="Accuracy", color="Method",
-                color_discrete_map=color_map, size_max=12,
-                title=f"<b>{backend_cur} 소요 시간과 근사비 상관관계</b>"
-            )
-            fig_scatter.update_traces(marker=dict(size=13, line=dict(width=2, color="#ffffff")), opacity=0.9)
-            fig_scatter.update_layout(**layout_update)
-            fig_scatter.update_layout(
-                title=dict(font=dict(size=18, color="#ffffff")),
-                xaxis_title="실행 시간 (Seconds)",
-                yaxis_title="근사비 (Accuracy)"
-            )
-            st.plotly_chart(fig_scatter, use_container_width=True)
+            qem_stages = get_realtime_qem_stages()
+            st_names = [s["stage"] for s in qem_stages]
+            st_ratios = [s["ratio"] for s in qem_stages]
+            st_cuts = [s["cut"] for s in qem_stages]
+            st_colors = [s["color"] for s in qem_stages]
+            delta_gain = st_ratios[3] - st_ratios[0]
 
-        with col_right:
-            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 엔터프라이즈 도입 관점: 비용 vs 시간</div>', unsafe_allow_html=True)
-            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>기법별 평균 실행 비용(USD) 및 소요 시간 비교</span>", unsafe_allow_html=True)
-
-            df_avg = df_filtered.groupby("Method", sort=False).agg({"Time_sec": "mean", "Cost_USD": "mean"}).reset_index()
-            fig_b2b = make_subplots(specs=[[{"secondary_y": True}]])
-
-            for method in df_avg["Method"]:
-                subset = df_avg[df_avg["Method"] == method]
-                fig_b2b.add_trace(go.Bar(
-                    x=subset["Method"], y=subset["Cost_USD"], name=f"{method} 비용",
-                    marker_color=color_map[method], marker_line=dict(width=1.5, color="#ffffff"), opacity=0.85
-                ), secondary_y=False)
-
-            fig_b2b.add_trace(go.Scatter(
-                x=df_avg["Method"], y=df_avg["Time_sec"], name="평균 소요 시간",
+            fig_stage = go.Figure()
+            fig_stage.add_trace(go.Bar(
+                x=st_names,
+                y=st_ratios,
+                marker_color=st_colors,
+                marker_line=dict(width=1.5, color="#ffffff"),
+                text=[f"<b>{r:.3f}</b><br>({c:.2f})" for r, c in zip(st_ratios, st_cuts)],
+                textposition="outside",
+                textfont=dict(size=12, color="#f8fafc"),
+                opacity=0.92,
+                width=0.52,
+                name="단계별 기대 근사비"
+            ))
+            fig_stage.add_trace(go.Scatter(
+                x=st_names,
+                y=st_ratios,
                 mode="lines+markers",
-                marker=dict(size=12, color="#fde047", symbol="diamond", line=dict(width=2, color="#ffffff")),
-                line=dict(width=3.5, color="#fde047", dash="dot")
-            ), secondary_y=True)
-
-            fig_b2b.update_layout(**layout_update)
-            fig_b2b.update_layout(
-                title=dict(
-                    text=f"<b>[{shots_cur}샷 · p={p_cur}] 클라우드 리소스 소모량 비교</b>",
-                    font=dict(size=18, color="#ffffff", family="Pretendard, sans-serif")
-                ),
-                barmode="group"
+                line=dict(color="#34d399", width=2.5),
+                marker=dict(size=8, color="#34d399", line=dict(width=1.5, color="#ffffff")),
+                name="복원 추세선"
+            ))
+            fig_stage.add_hline(
+                y=1.0,
+                line_dash="dash",
+                line_color="#94a3b8",
+                annotation_text="고전 최적해 (BF = 1.000)",
+                annotation_position="top left",
+                annotation_font_color="#cbd5e1"
             )
-            fig_b2b.update_yaxes(title_text="평균 실행 비용 (USD)", secondary_y=False, title_font=dict(color="#f8fafc"), tickfont=dict(color="#f8fafc"))
-            fig_b2b.update_yaxes(title_text="평균 실행 시간 (Seconds)", secondary_y=True, showgrid=False, title_font=dict(color="#fde047"), tickfont=dict(color="#fde047"))
-            st.plotly_chart(fig_b2b, use_container_width=True)
+            fig_stage.update_layout(**layout_update)
+            fig_stage.update_layout(
+                title=dict(
+                    text=f"<b>[실시간] 오류 완화 복원 효과 (Raw 대비 {delta_gain:+.3f})</b>",
+                    font=dict(size=17, color="#ffffff"),
+                    y=0.96
+                ),
+                yaxis=dict(title="기대 근사비 (⟨C⟩ / BF)", range=[0, 1.18], showgrid=True, gridcolor="#263147", color="#cbd5e1"),
+                showlegend=False,
+                margin=dict(l=45, r=30, t=80, b=40)
+            )
+            st.plotly_chart(fig_stage, use_container_width=True)
 
-        st.markdown("""
+        # =========================================================
+        # [그래프 3] 실시간 파라미터별 실행 이력 누적 비교
+        # =========================================================
+        with col_right:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 실시간 파라미터별 실행 이력 비교</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>회로 깊이(p)·샷 수·백엔드를 바꿔 실행할 때마다 실제 결과가 누적됩니다</span>", unsafe_allow_html=True)
+
+            if run_history:
+                hist_df = pd.DataFrame(run_history)
+                fig_hist = go.Figure()
+                fig_hist.add_trace(go.Scatter(
+                    x=hist_df["label"],
+                    y=hist_df["qem_raw_exp"],
+                    mode="lines+markers+text",
+                    name="Raw 기댓값",
+                    text=[f"{v:.3f}" for v in hist_df["qem_raw_exp"]],
+                    textposition="bottom center",
+                    textfont=dict(size=11.5, color="#fca5a5"),
+                    line=dict(color="#ef4444", width=3, dash="dot"),
+                    marker=dict(size=10, color="#ef4444", line=dict(width=1.5, color="#ffffff"))
+                ))
+                fig_hist.add_trace(go.Scatter(
+                    x=hist_df["label"],
+                    y=hist_df["qem_both_exp"],
+                    mode="lines+markers+text",
+                    name="ZNE+M3 기댓값",
+                    text=[f"{v:.3f}" for v in hist_df["qem_both_exp"]],
+                    textposition="top center",
+                    textfont=dict(size=11.5, color="#c4b5fd"),
+                    line=dict(color="#8b5cf6", width=3.5),
+                    marker=dict(size=11, color="#8b5cf6", line=dict(width=1.5, color="#ffffff"))
+                ))
+                fig_hist.add_trace(go.Scatter(
+                    x=hist_df["label"],
+                    y=hist_df["mit_ratio"],
+                    mode="lines+markers",
+                    name="완화 최빈해 근사비",
+                    line=dict(color="#10b981", width=2.5, dash="dash"),
+                    marker=dict(size=9, color="#10b981", symbol="diamond", line=dict(width=1.5, color="#ffffff"))
+                ))
+
+                y_vals_all = list(hist_df["qem_raw_exp"]) + list(hist_df["qem_both_exp"]) + list(hist_df["mit_ratio"])
+                h_ymin = max(0.0, min(y_vals_all) - 0.14)
+                h_ymax = min(1.15, max(y_vals_all) + 0.14)
+
+                fig_hist.update_layout(**layout_update)
+                fig_hist.update_layout(
+                    title=dict(
+                        text=f"<b>실시간 누적 실행 비교 (총 {len(hist_df)}회 실행)</b>",
+                        font=dict(size=17, color="#ffffff"),
+                        y=0.96
+                    ),
+                    xaxis=dict(title="실행 회차 및 조건", type="category", color="#cbd5e1"),
+                    yaxis=dict(title="근사비 (α)", range=[h_ymin, h_ymax], showgrid=True, gridcolor="#263147", color="#cbd5e1"),
+                    margin=dict(l=45, r=30, t=90, b=40),
+                    legend=dict(
+                        orientation="h",
+                        yanchor="bottom", y=1.02,
+                        xanchor="right", x=1.0,
+                        font=dict(size=11.5, color="#cbd5e1"),
+                        bgcolor="rgba(20,26,41,0.85)",
+                        bordercolor="#313e59",
+                        borderwidth=1
+                    )
+                )
+                st.plotly_chart(fig_hist, use_container_width=True)
+            else:
+                st.info("상단 '▶ 갈등 해결 실행'을 누르면 실행 조건별 실시간 비교 이력이 여기에 누적됩니다.")
+
+        # --- 실시간 동적 인사이트 박스 ---
+        bf_cut_now = float(benchmarks[0]["max_cut_value"])
+        gw_ratio_now = float(benchmarks[1]["ratio"])
+        raw_ratio_now = float(benchmarks[2]["ratio"])
+        mit_ratio_now = float(benchmarks[3]["ratio"])
+        qem_stages = get_realtime_qem_stages()
+        qem_raw_now = qem_stages[0]["ratio"]
+        qem_both_now = qem_stages[3]["ratio"]
+        qem_delta_pct = ((qem_both_now - qem_raw_now) / max(qem_raw_now, 0.001)) * 100.0
+
+        best_hist_txt = ""
+        if run_history:
+            best_run = max(run_history, key=lambda r: r["qem_both_exp"])
+            best_hist_txt = (
+                f"<li><b>누적 실행 중 최고 성능 조건:</b> <span style='color:#34d399; font-weight:bold;'>{best_run['label']}</span> "
+                f"(ZNE+M3 기대 근사비 <b>{best_run['qem_both_exp']:.3f}</b>, 완화 최빈해 <b>{best_run['mit_ratio']:.3f}</b>)</li>"
+            )
+
+        st.markdown(f"""
         <div style="background-color:#1e293b; border-left: 5px solid #6366f1; padding: 15px 18px; border-radius: 8px; margin-top: 8px;">
-            <div style="font-size:16px; font-weight:800; color:#ffffff; margin-bottom:8px;">💡 Q-PartyCut 엔터프라이즈 리포트 인사이트</div>
+            <div style="font-size:16px; font-weight:800; color:#ffffff; margin-bottom:8px;">💡 현재 실시간 분석 요약</div>
             <ul style="color:#e2e8f0; font-size:14.5px; line-height:1.65; margin-bottom:0; padding-left:20px;">
-                <li><b>빠른 응답이 필요한 실시간 서비스 (가성비):</b> <span style="color:#f87171; font-weight:bold;">M3 Only</span> 기법이 시간과 비용 증가를 최소화하면서도 유의미한 방어력을 제공합니다.</li>
-                <li><b>최고의 신뢰도가 요구되는 금융/연구 분야 (고성능):</b> <span style="color:#a78bfa; font-weight:bold;">ZNE + M3</span> 기법이 비용과 시간은 높으나, 노이즈 환경에서도 가장 완벽한 컷 정확도를 안정적으로 보장합니다.</li>
+                <li><b>고전 vs 양자 비교:</b> 고전 최적해(BF = {bf_cut_now:.1f}) 대비 GW 근사비는 <b>{gw_ratio_now:.3f}</b>, 완화 QAOA 근사비는 <b>{mit_ratio_now:.3f}</b> (Raw: {raw_ratio_now:.3f})를 달성했습니다.</li>
+                <li><b>오류 완화(M3+ZNE) 실시간 복원 효과:</b> 기대 근사비가 Raw <b>{qem_raw_now:.3f}</b>에서 ZNE+M3 <b>{qem_both_now:.3f}</b>로 <span style="color:#a78bfa; font-weight:bold;">{qem_delta_pct:+.1f}%</span> 변화했습니다.</li>
+                {best_hist_txt}
             </ul>
         </div>
         """, unsafe_allow_html=True)
@@ -1190,6 +1153,9 @@ if "active_qpu_device" not in st.session_state:
 
 if "last_exec_source" not in st.session_state:
     st.session_state.last_exec_source = ""
+
+if "run_history" not in st.session_state:
+    st.session_state.run_history = []
 
 if "current_preset" not in st.session_state:
     st.session_state.current_preset = "기본 파티 갈등망 (N=8)"
@@ -1570,18 +1536,25 @@ if action_clicked:
                 if raw_row and raw_row.bitstring:
                     st.session_state.raw_bitstring = raw_row.bitstring
 
-                t_bf_str = f"{bf_row.time:.3f}s" if (bf_row and bf_row.time is not None) else st.session_state.sim_result.get("t_bf", "-")
-                t_gw_str = f"{sdp_row.time:.3f}s" if (sdp_row and sdp_row.time is not None) else st.session_state.sim_result.get("t_gw", "-")
-                t_raw_str = f"{raw_row.time:.2f}s" if (raw_row and raw_row.time is not None) else st.session_state.sim_result.get("t_raw", "-")
-                t_mit_str = f"{mit_row.time:.2f}s" if (mit_row and mit_row.time is not None) else st.session_state.sim_result.get("t_mit", "-")
+                bf_sec_val = float(bf_row.time) if (bf_row and bf_row.time is not None) else st.session_state.sim_result.get("bf_sec", 0.01)
+                gw_sec_val = float(sdp_row.time) if (sdp_row and sdp_row.time is not None) else st.session_state.sim_result.get("gw_sec", 0.10)
+                raw_sec_val = float(raw_row.time) if (raw_row and raw_row.time is not None) else st.session_state.sim_result.get("raw_sec", 0.5)
+                mit_sec_val = float(mit_row.time) if (mit_row and mit_row.time is not None) else st.session_state.sim_result.get("mit_sec", 0.8)
+
+                t_bf_str = f"{bf_sec_val:.3f}s"
+                t_gw_str = f"{gw_sec_val:.3f}s"
+                t_raw_str = f"{raw_sec_val:.2f}s"
+                t_mit_str = f"{mit_sec_val:.2f}s"
 
                 api_sim = {
                     "bf_cut": bf_val,
                     "gw_cut": gw_val,
                     "raw_cut": raw_val,
                     "mit_cut": mit_val,
-                    "raw_sec": float(raw_row.time) if (raw_row and raw_row.time is not None) else st.session_state.sim_result.get("raw_sec", 0.5),
-                    "mit_sec": float(mit_row.time) if (mit_row and mit_row.time is not None) else st.session_state.sim_result.get("mit_sec", 0.8),
+                    "bf_sec": bf_sec_val,
+                    "gw_sec": gw_sec_val,
+                    "raw_sec": raw_sec_val,
+                    "mit_sec": mit_sec_val,
                     "t_bf": t_bf_str,
                     "t_gw": t_gw_str,
                     "t_raw": t_raw_str,
@@ -1601,19 +1574,16 @@ if action_clicked:
                 if res.qem is not None:
                     st.session_state.qem_report_actual = res.qem.model_dump()
 
-                st.session_state.report_df = generate_dynamic_experiment_df(
-                    num_tests=20,
-                    use_fixed_seed=False,
-                    show_progress=False
-                )
                 st.session_state.last_exec_source = "(FastAPI 백엔드)"
                 if not st.session_state.api_error_msg:
                     st.session_state.has_solved = True
                     st.session_state.view_after = True
+                    append_realtime_history(sim_backend_ui, int(qaoa_p), int(qaoa_shots))
         except JobAPIError as exc:
             if exc.status_code is None and backend_mode != "real_qpu":
                 st.session_state.has_solved = True
                 st.session_state.view_after = True
+                append_realtime_history(sim_backend_ui, int(qaoa_p), int(qaoa_shots))
             else:
                 st.session_state.api_error_msg = str(exc)
     elif backend_mode == "real_qpu":
@@ -1621,6 +1591,7 @@ if action_clicked:
     else:
         st.session_state.has_solved = True
         st.session_state.view_after = True
+        append_realtime_history(sim_backend_ui, int(qaoa_p), int(qaoa_shots))
 
     st.rerun()
 
