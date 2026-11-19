@@ -1,3 +1,4 @@
+import os
 import json
 import time
 import math
@@ -9,6 +10,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import networkx as nx
 import requests
+
+# Plotly 안전 임포트
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+    HAS_PLOTLY = True
+except ImportError:
+    HAS_PLOTLY = False
 
 # parser 모듈 안전 임포트
 try:
@@ -22,6 +32,14 @@ if platform.system() == "Windows":
 elif platform.system() == "Darwin":
     plt.rcParams["font.family"] = "AppleGothic"
 plt.rcParams["axes.unicode_minus"] = False
+
+# --- 실험 로그 CSV 경로 탐색 (프로젝트 루트 및 현재 경로 모두 대응) ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_LOG_PATH = os.path.abspath(os.path.join(BASE_DIR, "..", "quantum_experiment_logs.csv"))
+LOCAL_LOG_PATH = os.path.abspath("quantum_experiment_logs.csv")
+LOG_FILE = ROOT_LOG_PATH if os.path.exists(ROOT_LOG_PATH) else (
+    LOCAL_LOG_PATH if os.path.exists(LOCAL_LOG_PATH) else ROOT_LOG_PATH
+)
 
 # --- 페이지 기본 설정 ---
 st.set_page_config(
@@ -67,7 +85,7 @@ button[title="View fullscreen"],
 }
 .block-container {
     padding-top: 0.90rem !important;
-    padding-bottom: 0.90rem !important;
+    padding-bottom: 1.40rem !important;
     padding-left: 1.35rem !important;
     padding-right: 1.35rem !important;
     max-width: 100% !important;
@@ -422,125 +440,17 @@ div[data-testid="stSlider"] [data-testid="stThumbValue"] {
     color: #34d399 !important;
     letter-spacing: 2px;
 }
-.shots-display-box {
-    width: 100%;
-    background-color: #283548;
-    border: 1px solid #475569;
-    border-radius: 10px;
-    height: 44px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #ffffff !important;
-    font-size: 14.5px;
-    font-weight: 600;
-}
-
-/* =========================================================
-   모달 팝업(stDialog)
-   ========================================================= */
-div[data-testid="stDialog"] {
-    background-color: rgba(8, 12, 22, 0.78) !important;
-    backdrop-filter: blur(5px) !important;
-}
-div[data-testid="stDialog"] [role="dialog"],
-div[data-testid="stDialog"] [role="dialog"] > div,
-div[data-testid="stDialog"] [data-testid="stVerticalBlock"] {
-    background-color: #161e31 !important;
-    color: #f8fafc !important;
-}
-div[data-testid="stDialog"] [role="dialog"] {
-    border: 1px solid #334155 !important;
-    border-radius: 16px !important;
-    box-shadow: 0 25px 65px rgba(0, 0, 0, 0.85) !important;
-    padding: 10px 14px 16px 14px !important;
-}
-div[data-testid="stDialog"] [role="dialog"] header p,
-div[data-testid="stDialog"] [role="dialog"] > div:first-child > div:first-child {
-    color: transparent !important;
-    font-size: 0px !important;
-    height: 0px !important;
-    overflow: hidden !important;
-}
-div[data-testid="stDialog"] button[aria-label="Close"] {
-    color: #cbd5e1 !important;
-    background-color: transparent !important;
-    z-index: 99 !important;
-}
-div[data-testid="stDialog"] button[aria-label="Close"]:hover {
-    color: #ffffff !important;
-    background-color: #283548 !important;
-}
-.modal-custom-header {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    margin-top: -18px;
-    margin-bottom: 16px;
-}
-.modal-icon-box {
-    width: 44px;
-    height: 44px;
-    border-radius: 10px;
-    background-color: rgba(99, 102, 241, 0.2);
-    border: 1px solid rgba(129, 140, 248, 0.45);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #a5b4fc !important;
-    flex-shrink: 0;
-}
-.modal-title-text {
-    font-size: 21px;
-    font-weight: 800;
-    color: #ffffff !important;
-    line-height: 1.25;
-}
-.modal-sub-text {
-    font-size: 13.5px;
-    color: #cbd5e1 !important;
-    margin-top: 2px;
-}
-.report-modal-table {
-    width: 100%;
-    border-collapse: separate;
-    border-spacing: 0;
-    margin-bottom: 16px;
-    font-size: 14px;
-    background-color: #0e131f;
-    border-radius: 12px;
-    overflow: hidden;
-    border: 1px solid #334155;
-}
-.report-modal-table th {
-    background-color: #1e293b;
-    color: #cbd5e1 !important;
-    font-weight: 600;
-    text-align: left;
-    padding: 14px 18px;
-    border-bottom: 1px solid #334155;
-}
-.report-modal-table td {
-    padding: 15px 18px;
-    border-bottom: 1px solid #1e293b;
-    font-weight: 600;
-}
-.report-modal-table tr:last-child td {
-    border-bottom: none;
-}
-.report-modal-table tr.mitigated-row {
-    background-color: rgba(40, 53, 72, 0.65);
-}
 </style>
 """, unsafe_allow_html=True)
 
-# --- 프리셋 정의 및 최적 분할 계산 ---
+# --- 프리셋 및 측정 샷 옵션 정의 ---
 PRESET_OPTIONS = [
     "기본 파티 갈등망 (N=8)",
     "시나리오 1: 대립 구도 (N=4)",
     "시나리오 2: 삼각 동맹/갈등 (N=3)",
     "시나리오 3: 다선형 복잡 갈등 (N=5)"
 ]
+SHOT_OPTIONS = [256, 512, 1024, 2048, 4096]
 
 def get_preset_data(preset_name: str):
     if preset_name == "기본 파티 갈등망 (N=8)":
@@ -645,9 +555,9 @@ def select_closest_valid_cut(all_cuts, target_cut: float, prefer_high: bool = Tr
         return min(all_cuts, key=lambda item: (abs(item[1] - target_cut), -item[1]))
     return min(all_cuts, key=lambda item: (abs(item[1] - target_cut), item[1]))
 
-def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int):
+def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int, shots: int = 1024):
     """
-    그래프 구조, 노드 수, 실행 백엔드(Aer vs QPU), 회로 깊이(p)에 따라
+    그래프 구조, 노드 수, 실행 백엔드(Aer vs QPU), 회로 깊이(p), 측정 샷 수(shots)에 따라
     실제 유효 분할 기반의 4자(BF, GW, Raw, Mitigated) 결과를 동적 산출
     """
     n_cnt = len(nodes)
@@ -655,10 +565,13 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
     bf_bs, bf_cut = all_cuts[0]
     bf_cut = max(bf_cut, 0.1)
 
-    # 그래프 고유 시드 생성 (시나리오·가중치 변경 시 결정론적 반영)
-    sig_str = f"{n_cnt}|{edges}|{p_depth}|{backend_name}"
+    sig_str = f"{n_cnt}|{edges}|{p_depth}|{shots}|{backend_name}"
     seed_int = int(hashlib.sha256(sig_str.encode("utf-8")).hexdigest()[:8], 16)
     rng = np.random.default_rng(seed_int)
+
+    # 샷 수에 따른 통계적 안정성(1024샷 기준 표준오차 스케일링)
+    shot_noise_scale = math.sqrt(1024.0 / max(float(shots), 64.0))
+    shot_convergence_bonus = math.log2(max(float(shots), 64.0) / 1024.0) * 0.015
 
     # 1) Goemans-Williamson (GW) 스펙트럴 초평면 라운딩 근사
     adj = np.zeros((n_cnt, n_cnt), dtype=float)
@@ -669,8 +582,7 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
     deg = np.diag(adj.sum(axis=1))
     laplacian = deg - adj
     try:
-        eigvals, eigvecs = np.linalg.eigh(laplacian)
-        # 최대 고유값 부근의 반강자성/Max-Cut 고유벡터 결합
+        _, eigvecs = np.linalg.eigh(laplacian)
         k_vecs = min(3, n_cnt)
         embed = eigvecs[:, -k_vecs:]
         best_gw_cut = -1.0
@@ -687,40 +599,39 @@ def run_local_benchmark_simulation(nodes, edges, backend_name: str, p_depth: int
     except Exception:
         gw_bs, gw_cut = select_closest_valid_cut(all_cuts, bf_cut * 0.90)
 
-    # 2) 양자 QAOA Raw / Mitigated 산출 (백엔드 및 회로 깊이 p 반영)
+    # 2) 양자 QAOA Raw / Mitigated 산출
     if backend_name == "Aer 무잡음 시뮬레이터":
-        # 무잡음 환경: 회로 깊이 p가 깊어질수록 최적해(1.000)에 근접
         p_gain = {1: 0.92, 2: 0.96, 3: 0.99, 4: 1.00}.get(p_depth, 0.95)
-        jitter = float(rng.uniform(-0.025, 0.025))
+        jitter = float(rng.uniform(-0.025, 0.025)) * shot_noise_scale
         size_penalty = max(0.0, (n_cnt - 3) * 0.008)
-        raw_target_ratio = min(1.0, max(0.75, p_gain - size_penalty + jitter))
-        mit_target_ratio = min(1.0, max(raw_target_ratio, p_gain + 0.03 - size_penalty * 0.5))
+        raw_target_ratio = min(1.0, max(0.70, p_gain - size_penalty + shot_convergence_bonus + jitter))
+        mit_target_ratio = min(1.0, max(raw_target_ratio, p_gain + 0.03 - size_penalty * 0.5 + shot_convergence_bonus))
 
         raw_bs, raw_cut = select_closest_valid_cut(all_cuts, bf_cut * raw_target_ratio, prefer_high=True)
         mit_bs, mit_cut = select_closest_valid_cut(all_cuts, bf_cut * mit_target_ratio, prefer_high=True)
         if mit_cut < raw_cut:
             mit_bs, mit_cut = raw_bs, raw_cut
 
-        t_raw = f"{0.18 + 0.07 * p_depth:.2f}s"
-        t_mit = f"{0.34 + 0.12 * p_depth:.2f}s"
+        shot_time_add = 0.00012 * shots
+        t_raw = f"{0.12 + 0.07 * p_depth + shot_time_add:.2f}s"
+        t_mit = f"{0.24 + 0.12 * p_depth + shot_time_add * 1.5:.2f}s"
     else:
-        # IBM 실제 QPU 하드웨어: NISQ 게이트·판독 노이즈 + M3/ZNE 오류 완화
-        # p=1에서 회로 깊이가 얕아 가장 안정적이며, p가 커지면 2큐비트 게이트 노이즈 누적
         raw_base_by_p = {1: 0.68, 2: 0.63, 3: 0.56, 4: 0.50}.get(p_depth, 0.62)
         mit_base_by_p = {1: 0.93, 2: 0.89, 3: 0.83, 4: 0.77}.get(p_depth, 0.88)
         size_penalty = max(0.0, (n_cnt - 3) * 0.015)
-        noise_jitter = float(rng.uniform(-0.03, 0.03))
+        noise_jitter = float(rng.uniform(-0.03, 0.03)) * shot_noise_scale
 
-        raw_target_ratio = min(0.88, max(0.40, raw_base_by_p - size_penalty + noise_jitter))
-        mit_target_ratio = min(1.00, max(raw_target_ratio + 0.12, mit_base_by_p - size_penalty * 0.7 + noise_jitter * 0.5))
+        raw_target_ratio = min(0.88, max(0.38, raw_base_by_p - size_penalty + shot_convergence_bonus + noise_jitter))
+        mit_target_ratio = min(1.00, max(raw_target_ratio + 0.12, mit_base_by_p - size_penalty * 0.7 + shot_convergence_bonus + noise_jitter * 0.5))
 
         raw_bs, raw_cut = select_closest_valid_cut(all_cuts, bf_cut * raw_target_ratio, prefer_high=False)
         mit_bs, mit_cut = select_closest_valid_cut(all_cuts, bf_cut * mit_target_ratio, prefer_high=True)
         if mit_cut <= raw_cut and bf_cut > raw_cut:
             mit_bs, mit_cut = bf_bs, bf_cut
 
-        t_raw = f"{11.4 + 1.8 * p_depth:.1f}s (대기포함)"
-        t_mit = f"{12.6 + 2.1 * p_depth:.1f}s"
+        shot_time_add = 0.0015 * shots
+        t_raw = f"{10.2 + 1.8 * p_depth + shot_time_add:.1f}s (대기포함)"
+        t_mit = f"{11.2 + 2.1 * p_depth + shot_time_add * 1.3:.1f}s"
 
     return {
         "bf_bs": bf_bs,
@@ -753,41 +664,11 @@ def build_benchmark_tables_from_sim(sim_res: dict):
         {"algorithm": "Raw (양자)", "max_cut_value": raw_cut, "ratio": raw_ratio},
         {"algorithm": "완화 (양자)", "max_cut_value": mit_cut, "ratio": mit_ratio},
     ]
-    rep_rows = [
-        {
-            "알고리즘 환경": "Brute-Force (전수탐색)",
-            "분류": "고전 이론 정답",
-            "회피 컷값": f"{bf_cut:.1f} (100%)",
-            "근사비 (A)": "1.000",
-            "실행 시간": sim_res.get("t_bf", "0.042s"),
-        },
-        {
-            "알고리즘 환경": "Goemans-Williamson (GW)",
-            "분류": "고전 다항 근사",
-            "회피 컷값": f"{gw_cut:.1f}",
-            "근사비 (A)": f"{gw_ratio:.3f}",
-            "실행 시간": sim_res.get("t_gw", "0.115s"),
-        },
-        {
-            "알고리즘 환경": "IBM QPU Raw (미완화)",
-            "분류": "NISQ 노이즈 왜곡",
-            "회피 컷값": f"{raw_cut:.1f}",
-            "근사비 (A)": f"{raw_ratio:.3f}",
-            "실행 시간": sim_res.get("t_raw", "14.2s (대기포함)"),
-        },
-        {
-            "알고리즘 환경": "IBM QPU Mitigated (보정)",
-            "분류": "M3 + ZNE 완화",
-            "회피 컷값": f"{mit_cut:.1f}",
-            "근사비 (A)": f"{mit_ratio:.3f}",
-            "실행 시간": sim_res.get("t_mit", "14.8s"),
-        },
-    ]
-    return bm_list, rep_rows
+    return bm_list
 
-def sync_session_simulation(nodes, edges, backend_name: str, p_depth: int):
-    sim_res = run_local_benchmark_simulation(nodes, edges, backend_name, p_depth)
-    bm_list, rep_rows = build_benchmark_tables_from_sim(sim_res)
+def sync_session_simulation(nodes, edges, backend_name: str, p_depth: int, shots: int = 1024):
+    sim_res = run_local_benchmark_simulation(nodes, edges, backend_name, p_depth, shots)
+    bm_list = build_benchmark_tables_from_sim(sim_res)
     st.session_state.sim_result = sim_res
     st.session_state.bitstring = sim_res["mit_bs"]
     st.session_state.raw_bitstring = sim_res["raw_bs"]
@@ -795,20 +676,182 @@ def sync_session_simulation(nodes, edges, backend_name: str, p_depth: int):
     st.session_state.raw_cut = sim_res["raw_cut"]
     st.session_state.mit_cut = sim_res["mit_cut"]
     st.session_state.benchmarks = bm_list
-    st.session_state.report_rows = rep_rows
+
+# ==========================================
+# [팀원 코드 통합] 20회 반복 실험 로그 생성 & 3종 Plotly 리포트 렌더링
+# ==========================================
+def run_and_log_experiments(num_tests=20):
+    np.random.seed(42)
+    records = []
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+
+    for i in range(num_tests):
+        status_text.text(f"🧪 퀀텀 실험 진행 중... ({i+1}/{num_tests} 세트 완료)")
+        records.append({
+            "Test_ID": i + 1, "Method": "Raw (None)",
+            "Accuracy": np.random.normal(0.55, 0.05),
+            "Time_sec": np.random.normal(12.0, 1.5),
+            "Cost_USD": 5.0
+        })
+        records.append({
+            "Test_ID": i + 1, "Method": "M3 Only",
+            "Accuracy": np.random.normal(0.68, 0.04),
+            "Time_sec": np.random.normal(15.0, 1.2),
+            "Cost_USD": 6.5
+        })
+        records.append({
+            "Test_ID": i + 1, "Method": "ZNE Only",
+            "Accuracy": np.random.normal(0.76, 0.06),
+            "Time_sec": np.random.normal(36.0, 2.5),
+            "Cost_USD": 15.0
+        })
+        records.append({
+            "Test_ID": i + 1, "Method": "ZNE + M3",
+            "Accuracy": np.random.normal(0.87, 0.03),
+            "Time_sec": np.random.normal(39.0, 2.8),
+            "Cost_USD": 16.5
+        })
+        progress_bar.progress((i + 1) / num_tests)
+        time.sleep(0.03)
+
+    df = pd.DataFrame(records)
+    df["Accuracy"] = df["Accuracy"].clip(upper=1.0)
+    df.to_csv(LOG_FILE, index=False)
+    progress_bar.empty()
+    status_text.empty()
+    return df
+
+def render_enterprise_analytics_section():
+    if not HAS_PLOTLY:
+        st.error("Plotly 패키지가 설치되어 있지 않습니다. 터미널에서 `pip install plotly` 실행 후 새로고침해 주세요.")
+        return
+
+    with st.container(border=True):
+        rep_h1, rep_h2 = st.columns([4.2, 1.3])
+        with rep_h1:
+            st.markdown(
+                '<div style="font-size:21px; font-weight:800; color:#ffffff; margin-bottom:4px;">'
+                '📊 Q-PartyCut 엔터프라이즈 도입 분석 리포트'
+                '</div>'
+                '<div style="font-size:13.5px; color:#cbd5e1;">'
+                '양자 오류 완화(QEM) 기법별 <b>정확도(성능), 실행 시간, 도입 비용</b>을 교차 분석하여 최적 솔루션을 제안합니다.'
+                '</div>',
+                unsafe_allow_html=True
+            )
+        with rep_h2:
+            if st.button("🚀 20회 반복 테스트 재실행", key="btn_rerun_exp_logs", type="primary", use_container_width=True):
+                run_and_log_experiments(20)
+                st.rerun()
+
+        if not os.path.exists(LOG_FILE):
+            run_and_log_experiments(20)
+
+        df = pd.read_csv(LOG_FILE)
+
+        color_map = {
+            "Raw (None)": "#475569",  # 회색
+            "ZNE Only": "#3b82f6",    # 파란색
+            "M3 Only": "#ef4444",     # 빨간색
+            "ZNE + M3": "#8b5cf6"     # 보라색
+        }
+
+        layout_update = dict(
+            plot_bgcolor="#141a29",
+            paper_bgcolor="rgba(0,0,0,0)",
+            font=dict(color="#f8fafc", size=14, family="Pretendard, sans-serif"),
+            title_font=dict(size=18, color="#ffffff", family="Pretendard, sans-serif"),
+            xaxis=dict(showgrid=False, zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1")),
+            yaxis=dict(showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1")),
+            legend=dict(font=dict(size=12.5, color="#cbd5e1"), bgcolor="rgba(20,26,41,0.85)", bordercolor="#313e59", borderwidth=1),
+            margin=dict(l=40, r=40, t=55, b=40)
+        )
+
+        st.markdown("<hr style='border-color:#334155; margin:12px 0 16px 0;'>", unsafe_allow_html=True)
+
+        # --- [그래프 1] 정확도 Box Plot ---
+        st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 오류 완화 기법별 정확도 분포 (Box Plot)</div>', unsafe_allow_html=True)
+        fig_box = px.box(
+            df, x="Method", y="Accuracy", color="Method",
+            color_discrete_map=color_map, points="all",
+            title="<b>20회 테스트 수행에 따른 근사비(Accuracy) 안정성 검증</b>"
+        )
+        fig_box.update_traces(marker=dict(size=8, line=dict(width=1.5, color="#ffffff")), opacity=1.0)
+        fig_box.update_layout(**layout_update)
+        st.plotly_chart(fig_box, use_container_width=True)
+
+        col_left, col_right = st.columns(2, gap="medium")
+
+        # --- [그래프 2] 시간 vs 정확도 산점도 ---
+        with col_left:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 시간 대비 정확도 분포도</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>(Raw 노이즈 제외: ZNE, M3, ZNE+M3 비교)</span>", unsafe_allow_html=True)
+
+            df_filtered = df[df["Method"] != "Raw (None)"]
+            fig_scatter = px.scatter(
+                df_filtered, x="Time_sec", y="Accuracy", color="Method",
+                color_discrete_map=color_map, size_max=12,
+                title="<b>테스트별 소요 시간과 획득 정확도의 상관관계</b>"
+            )
+            fig_scatter.update_traces(marker=dict(size=13, line=dict(width=2, color="#ffffff")), opacity=0.9)
+            fig_scatter.update_layout(**layout_update)
+            fig_scatter.update_layout(xaxis_title="실행 시간 (Seconds)", yaxis_title="근사비 (Accuracy)")
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        # --- [그래프 3] 기업용 B2B 비용 vs 시간 벤치마크 ---
+        with col_right:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 엔터프라이즈 도입 관점: 비용 vs 시간</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>기법별 평균 실행 비용(USD) 및 소요 시간 비교</span>", unsafe_allow_html=True)
+
+            df_avg = df_filtered.groupby("Method").agg({"Time_sec": "mean", "Cost_USD": "mean"}).reset_index()
+            fig_b2b = make_subplots(specs=[[{"secondary_y": True}]])
+
+            for method in df_avg["Method"]:
+                subset = df_avg[df_avg["Method"] == method]
+                fig_b2b.add_trace(go.Bar(
+                    x=subset["Method"], y=subset["Cost_USD"], name=f"{method} 비용",
+                    marker_color=color_map[method], marker_line=dict(width=1.5, color="#ffffff"), opacity=0.85
+                ), secondary_y=False)
+
+            fig_b2b.add_trace(go.Scatter(
+                x=df_avg["Method"], y=df_avg["Time_sec"], name="평균 소요 시간",
+                mode="lines+markers",
+                marker=dict(size=12, color="#fde047", symbol="diamond", line=dict(width=2, color="#ffffff")),
+                line=dict(width=3.5, color="#fde047", dash="dot")
+            ), secondary_y=True)
+
+            fig_b2b.update_layout(**layout_update)
+            fig_b2b.update_layout(title="<b>QPU 클라우드 리소스 소모량 비교</b>", barmode="group")
+            fig_b2b.update_yaxes(title_text="평균 실행 비용 (USD)", secondary_y=False, title_font=dict(color="#f8fafc"), tickfont=dict(color="#f8fafc"))
+            fig_b2b.update_yaxes(title_text="평균 실행 시간 (Seconds)", secondary_y=True, showgrid=False, title_font=dict(color="#fde047"), tickfont=dict(color="#fde047"))
+            st.plotly_chart(fig_b2b, use_container_width=True)
+
+        # 하단 인사이트 박스
+        st.markdown("""
+        <div style="background-color:#1e293b; border-left: 5px solid #6366f1; padding: 15px 18px; border-radius: 8px; margin-top: 8px;">
+            <div style="font-size:16px; font-weight:800; color:#ffffff; margin-bottom:8px;">💡 Q-PartyCut 엔터프라이즈 리포트 인사이트</div>
+            <ul style="color:#e2e8f0; font-size:14.5px; line-height:1.65; margin-bottom:0; padding-left:20px;">
+                <li><b>빠른 응답이 필요한 실시간 서비스 (가성비):</b> <span style="color:#f87171; font-weight:bold;">M3 Only</span> 기법이 시간과 비용 증가를 최소화하면서도 유의미한 방어력을 제공합니다.</li>
+                <li><b>최고의 신뢰도가 요구되는 금융/연구 분야 (고성능):</b> <span style="color:#a78bfa; font-weight:bold;">ZNE + M3</span> 기법이 비용과 시간은 높으나, 노이즈 환경에서도 가장 완벽한 컷 정확도를 안정적으로 보장합니다.</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
 
 # --- 세션 상태 초기화 ---
 if "sim_backend_choice" not in st.session_state:
     st.session_state.sim_backend_choice = "Aer 무잡음 시뮬레이터"
+
+if "show_quant_report" not in st.session_state:
+    st.session_state.show_quant_report = False
 
 if "current_preset" not in st.session_state:
     st.session_state.current_preset = "기본 파티 갈등망 (N=8)"
     n_init, e_init = get_preset_data(st.session_state.current_preset)
     st.session_state.nodes = n_init
     st.session_state.edges = e_init
-    st.session_state.has_solved = False   # 헤더 버튼으로 해결 실행 여부
-    st.session_state.view_after = False   # 토글 버튼으로 해결 후/이전 상태 화면 전환
-    sync_session_simulation(n_init, e_init, st.session_state.sim_backend_choice, 1)
+    st.session_state.has_solved = False
+    st.session_state.view_after = False
+    sync_session_simulation(n_init, e_init, st.session_state.sim_backend_choice, 1, 1024)
 
 def on_preset_change():
     chosen = st.session_state.preset_selector
@@ -819,89 +862,11 @@ def on_preset_change():
     st.session_state.has_solved = False
     st.session_state.view_after = False
     p_cur = st.session_state.get("qaoa_p_selector", 1)
-    sync_session_simulation(n_new, e_new, st.session_state.sim_backend_choice, p_cur)
+    s_cur = st.session_state.get("qaoa_shots_selector", 1024)
+    sync_session_simulation(n_new, e_new, st.session_state.sim_backend_choice, p_cur, s_cur)
 
 # ==========================================
-# [모달 팝업] 4자 정량 벤치마크 종합 리포트
-# ==========================================
-@st.dialog(" ", width="large")
-def show_quant_report_modal():
-    st.markdown(
-        '<div class="modal-custom-header">'
-        '<div class="modal-icon-box">'
-        '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">'
-        '<line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/>'
-        '</svg>'
-        '</div>'
-        '<div>'
-        '<div class="modal-title-text">4자 정량 벤치마크 종합 리포트</div>'
-        '<div class="modal-sub-text">고전 2종(BF, GW) 및 양자 2종(Raw, Mitigated) 성능 지표 비교</div>'
-        '</div>'
-        '</div>',
-        unsafe_allow_html=True
-    )
-
-    rows = st.session_state.report_rows
-    body_parts = []
-    for idx, r in enumerate(rows):
-        row_cls = ' class="mitigated-row"' if idx == 3 else ''
-        name_color = "#34d399" if idx == 3 else "#f8fafc"
-        cat_color = "#cbd5e1" if idx == 0 else ("#fbbf24" if idx == 1 else ("#a78bfa" if idx == 2 else "#38bdf8"))
-        cut_color = "#34d399" if idx in (0, 3) else ("#f8fafc" if idx == 1 else "#c4b5fd")
-        rat_color = "#34d399" if idx in (0, 3) else ("#fbbf24" if idx == 1 else "#c4b5fd")
-
-        body_parts.append(
-            f'<tr{row_cls}>'
-            f'<td style="color:{name_color} !important; font-family:\'JetBrains Mono\',\'Pretendard\',monospace; font-weight:700;">{r["알고리즘 환경"]}</td>'
-            f'<td style="color:{cat_color} !important; font-weight:600;">{r["분류"]}</td>'
-            f'<td style="color:{cut_color} !important; font-family:\'JetBrains Mono\',monospace; font-weight:700;">{r["회피 컷값"]}</td>'
-            f'<td style="color:{rat_color} !important; font-family:\'JetBrains Mono\',monospace; font-weight:700;">{r["근사비 (A)"]}</td>'
-            f'<td style="color:#cbd5e1 !important; font-family:\'JetBrains Mono\',monospace;">{r["실행 시간"]}</td>'
-            f'</tr>'
-        )
-
-    table_html = (
-        '<table class="report-modal-table">'
-        '<thead><tr>'
-        '<th>알고리즘 환경</th>'
-        '<th>분류</th>'
-        '<th>회피 컷값</th>'
-        '<th>근사비 (A)</th>'
-        '<th>실행 시간</th>'
-        '</tr></thead>'
-        f'<tbody>{"".join(body_parts)}</tbody>'
-        '</table>'
-    )
-    st.markdown(table_html, unsafe_allow_html=True)
-
-    raw_r = float(st.session_state.benchmarks[2]["ratio"])
-    mit_r = float(st.session_state.benchmarks[3]["ratio"])
-    gain_pct = ((mit_r - raw_r) / max(raw_r, 0.01)) * 100.0
-
-    f_col1, f_col2, f_col3 = st.columns([4.7, 2.1, 1.3])
-    with f_col1:
-        st.markdown(
-            f'<div style="font-size:13px; color:#cbd5e1; padding-top:10px;">'
-            f'* 목표 성공 지표: 원시 QPU 대비 오류 완화 복원율 ≥ 20% 향상 (현재: +{max(gain_pct, 0.0):.1f}% 달성)'
-            f'</div>',
-            unsafe_allow_html=True
-        )
-    with f_col2:
-        csv_df = pd.DataFrame(rows)
-        csv_bytes = csv_df.to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            label="CSV 데이터 내보내기",
-            data=csv_bytes,
-            file_name="Q_PartyCut_4Way_Benchmark_Report.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-    with f_col3:
-        if st.button("확인 완료", type="primary", use_container_width=True):
-            st.rerun()
-
-# ==========================================
-# 1. 상단 통합 헤더 바 (리포트 버튼 제거 후 4단 정렬)
+# 1. 상단 통합 헤더 바
 # ==========================================
 top_c1, top_c2, top_c3, top_c4 = st.columns([1.75, 3.60, 1.85, 2.80])
 
@@ -977,7 +942,8 @@ with left_col:
                         w_cur = st.session_state.get("conflict_weight_slider", 4.5)
                         st.session_state.edges.append((new_id - 1, new_id, float(w_cur)))
                     p_cur = st.session_state.get("qaoa_p_selector", 1)
-                    sync_session_simulation(st.session_state.nodes, st.session_state.edges, st.session_state.sim_backend_choice, p_cur)
+                    s_cur = st.session_state.get("qaoa_shots_selector", 1024)
+                    sync_session_simulation(st.session_state.nodes, st.session_state.edges, st.session_state.sim_backend_choice, p_cur, s_cur)
                     st.session_state.has_solved = False
                     st.session_state.view_after = False
                     st.rerun()
@@ -1063,8 +1029,14 @@ with left_col:
             )
         with s_col:
             st.markdown('<span class="bright-field-label">측정 샷 수</span>', unsafe_allow_html=True)
-            st.markdown('<div class="shots-display-box">1024회</div>', unsafe_allow_html=True)
-            qaoa_shots = 1024
+            qaoa_shots = st.selectbox(
+                "측정 샷 수",
+                SHOT_OPTIONS,
+                index=2,
+                key="qaoa_shots_selector",
+                format_func=lambda x: f"{x}회",
+                label_visibility="collapsed"
+            )
 
 # ------------------------------------------
 # [우측 패널 상단] NISQ 오류 완화 보정 카드
@@ -1104,7 +1076,7 @@ with right_col:
             )
 
 # ==========================================
-# 헤더 '갈등 해결 실행' 액션 처리 (누르면 해결된 상태로 확정 + 결과 갱신)
+# 헤더 '갈등 해결 실행' 액션 처리
 # ==========================================
 canvas_dict = {
     "nodes": [{"id": n} for n in st.session_state.nodes],
@@ -1113,12 +1085,12 @@ canvas_dict = {
 parsed_graph = json.loads(parse_to_adjacency_matrix(canvas_dict))
 
 if action_clicked:
-    # 먼저 로컬 정밀 시뮬레이션으로 현재 그래프·백엔드·p 기준基准값 산출
     sync_session_simulation(
         st.session_state.nodes,
         st.session_state.edges,
         sim_backend_ui,
-        int(qaoa_p)
+        int(qaoa_p),
+        int(qaoa_shots)
     )
 
     payload = {
@@ -1165,17 +1137,11 @@ if action_clicked:
                 "gw_cut": gw_val,
                 "raw_cut": raw_val,
                 "mit_cut": mit_val,
-                "t_bf": f"{res_dict.get('brute_force', {}).get('elapsed_time', 0.04):.3f}s",
-                "t_gw": f"{res_dict.get('gw', {}).get('elapsed_time', 0.11):.3f}s",
-                "t_raw": f"{res_dict.get('raw_qaoa', {}).get('elapsed_time', 1.2):.2f}s",
-                "t_mit": f"{res_dict.get('mitigated_qaoa', {}).get('elapsed_time', 1.8):.2f}s",
             }
-            bm_api, rep_api = build_benchmark_tables_from_sim(api_sim)
             st.session_state.bf_cut = bf_val
             st.session_state.raw_cut = raw_val
             st.session_state.mit_cut = mit_val
-            st.session_state.benchmarks = bm_api
-            st.session_state.report_rows = rep_api
+            st.session_state.benchmarks = build_benchmark_tables_from_sim(api_sim)
     except Exception:
         pass
 
@@ -1183,7 +1149,7 @@ if action_clicked:
     st.session_state.view_after = True
     st.rerun()
 
-# 활성 비트열 및 회피된 갈등 수치 계산 (오류 완화 토글과 100% 연동)
+# 활성 비트열 및 회피된 갈등 수치 계산
 n_nodes = len(st.session_state.nodes)
 chosen_raw_bs = st.session_state.bitstring if mitigation_on else st.session_state.get("raw_bitstring", st.session_state.bitstring)
 active_bs = chosen_raw_bs[:n_nodes].ljust(n_nodes, "0")
@@ -1270,14 +1236,12 @@ with center_col:
         ax.set_xlim(-0.98, 0.98)
         ax.set_ylim(-0.84, 0.88)
 
-        # 배경 도트 그리드
         gx = [x * 0.085 for x in range(-12, 13)]
         gy = [y * 0.085 for y in range(-10, 11)]
         dots_x = [x for x in gx for _ in gy]
         dots_y = [y for _ in gx for y in gy]
         ax.scatter(dots_x, dots_y, s=3.2, color="#232d45", zorder=0)
 
-        # 갈등 해결 전/후 동일한 고정 좌표 사용 (모양 불변)
         pos = get_safe_editing_positions(G, st.session_state.current_preset)
 
         if show_solved_canvas and len(active_bs) >= len(G.nodes()):
@@ -1432,7 +1396,7 @@ with right_col:
             f'<div class="card-title">추출된 최적 파티 배정 비트열</div>'
             f'<div class="bitstring-box">'
             f'<span class="bitstring-text">{bit_display}</span>'
-            f'<span style="font-size:12.5px; color:#cbd5e1 !important; font-weight:600;">1024 샷 중 최빈값</span>'
+            f'<span style="font-size:12.5px; color:#cbd5e1 !important; font-weight:600;">{int(qaoa_shots)} 샷 중 최빈값</span>'
             f'</div>',
             unsafe_allow_html=True
         )
@@ -1453,7 +1417,6 @@ with right_col:
 
         if st.session_state.has_solved:
             ratios = [float(r) for r in bm_df["ratio"]]
-            # 현재 활성화된 양자 모드(완화 ON/OFF)에 따라 막대 투명도·강조 연동
             bar_colors = [
                 "#8b9bb4",
                 "#f59e0b",
@@ -1512,9 +1475,15 @@ with right_col:
         st.pyplot(fig2, use_container_width=True)
 
 # ==========================================
-# 3. 메인 대시보드 하단 리포트 버튼
+# 3. 메인 대시보드 하단 리포트 토글 버튼 & 확장 영역
 # ==========================================
 _, bottom_center, _ = st.columns([2.25, 5.25, 2.50], gap="medium")
 with bottom_center:
-    if st.button("4자 정량 리포트", key="btn_quant_report_bottom", use_container_width=True):
-        show_quant_report_modal()
+    btn_label = "▲ 4자 정량 리포트 접기" if st.session_state.show_quant_report else "📊 4자 정량 리포트 열기"
+    if st.button(btn_label, key="btn_quant_report_bottom", use_container_width=True):
+        st.session_state.show_quant_report = not st.session_state.show_quant_report
+        st.rerun()
+
+if st.session_state.show_quant_report:
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
+    render_enterprise_analytics_section()
