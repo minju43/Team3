@@ -792,7 +792,7 @@ def render_enterprise_analytics_section():
         # --- [그래프 3] 오류 완화 기법 4종 실시간 비교 (Raw / M3 / ZNE / ZNE+M3) ---
         st.markdown("<hr style='border-color:#334155; margin:14px 0;'>", unsafe_allow_html=True)
 
-        qem_raw = raw_cut
+        qem_raw = float(sim.get("qem_raw", raw_cut))
         qem_m3 = float(sim.get("m3_cut", mit_cut))
         qem_zne = float(sim.get("zne_cut", mit_cut))
         qem_both = float(sim.get("both_cut", max(qem_m3, qem_zne)))
@@ -815,7 +815,7 @@ def render_enterprise_analytics_section():
             qem_df, x="Method", y="Accuracy", color="Method",
             color_discrete_map=qem_colors, text="Accuracy",
             custom_data=["Cut"],
-            title="<b>3. 양자 오류 완화 기법별 정확도 비교 (Raw vs M3 Only vs ZNE Only vs ZNE+M3)</b>"
+            title="<b>3. 오류 완화 기법별 평균 기댓값(&lt;C&gt;) 복원 추이 (Raw → M3 → ZNE → ZNE+M3)</b>"
         )
         fig_qem.update_traces(
             texttemplate="<b>%{text:.3f}</b><br><span style='font-size:11px; color:#cbd5e1;'>(Cut %{customdata[0]:.2f})</span>",
@@ -823,13 +823,13 @@ def render_enterprise_analytics_section():
             marker_line=dict(width=1.5, color="#ffffff"),
             textfont=dict(color="#ffffff", size=13),
         )
-        fig_qem.add_hline(
-            y=0.70, line_dash="dot", line_color="#fbbf24",
-            annotation_text="목표 기준 (0.70)", annotation_font_color="#fbbf24"
-        )
+        # 데이터 범위에 맞춰 Y축 자동 확대 (계단식 상승이 잘 보이도록)
+        y_min = max(0.0, float(qem_df["Accuracy"].min()) - 0.05)
+        y_max = min(1.15, float(qem_df["Accuracy"].max()) + 0.06)
+
         fig_qem.update_layout(**layout_common)
         fig_qem.update_layout(height=360)
-        fig_qem.update_yaxes(title_text="근사비 (Accuracy)", range=[0, 1.22])
+        fig_qem.update_yaxes(title_text="기댓값 근사비 (<C> / Optimal)", range=[y_min, y_max])
         st.plotly_chart(fig_qem, use_container_width=True)
 
         # --- 하단 4자 상세 정량 비교표 ---
@@ -1183,16 +1183,15 @@ if action_clicked:
             gw_val = float(gw_api.get("cut_value", st.session_state.benchmarks[1]["max_cut_value"]))
             raw_val = float(raw_api.get("cut_value", st.session_state.raw_cut))
 
-            # 1) M3 단독 결과 (백엔드 M3 보정 분할)
+            # 1) M3 및 ZNE 원시 값 추출
             m3_val = float(mit_api.get("cut_value", st.session_state.mit_cut))
             mit_bs = mit_api.get("bitstring", st.session_state.bitstring)
-
-            # 2) ZNE 단독 결과 (백엔드 ZNE 외삽 기댓값, 최대 BF 컷으로 상한 제한)
             zne_info = (mit_api.get("details") or {}).get("zne") or {}
             zne_val = min(bf_val, max(0.0, float(zne_info.get("expected_cut_value", m3_val))))
 
-            # 3) M3 + ZNE 결합 보정 (M3 보정 분포 상위 후보 + ZNE 외삽 기댓값 반영)
+            # 2) 메인 화면용(1·2번 그래프): M3 보정 분포 상위 32개 중 최고 컷 분할 선택
             both_val = max(m3_val, zne_val)
+            raw_dist = (raw_api.get("details") or {}).get("distribution") or {}
             mit_dist = (mit_api.get("details") or {}).get("distribution") or {}
             if mit_dist:
                 top_candidates = sorted(mit_dist.items(), key=lambda x: x[1], reverse=True)[:32]
@@ -1200,25 +1199,39 @@ if action_clicked:
                     cand_bs = raw_bits.replace(" ", "")[::-1]
                     if len(cand_bs) == len(st.session_state.nodes):
                         cand_cut = evaluate_cut_value(cand_bs, st.session_state.edges)
-                        if cand_cut >= both_val:
+                        if cand_cut > both_val:
                             both_val = cand_cut
                             mit_bs = cand_bs
-                        elif cand_cut > m3_val:
-                            mit_bs = cand_bs
+
+            # 3) 3번 그래프용: 4종 모두 동일한 '기댓값(<C>)' 기준으로 공정 비교
+            def _calc_expected_cut(dist: dict) -> float:
+                if not dist:
+                    return 0.0
+                return sum(
+                    float(prob) * evaluate_cut_value(bits.replace(" ", "")[::-1], st.session_state.edges)
+                    for bits, prob in dist.items()
+                    if len(bits.replace(" ", "")) == len(st.session_state.nodes)
+                )
+
+            raw_exp = _calc_expected_cut(raw_dist) or raw_val
+            m3_exp = _calc_expected_cut(mit_dist) or m3_val
+            zne_exp = min(bf_val, max(0.0, float(zne_info.get("expected_cut_value", raw_exp))))
+            both_exp = min(bf_val, max(m3_exp, zne_exp) + max(0.0, m3_exp - raw_exp))
 
             st.session_state.bitstring = mit_bs
             if raw_api.get("bitstring"):
                 st.session_state.raw_bitstring = raw_api["bitstring"]
 
-            # 메인 '완화 (양자)' 지표(mit_cut)에 M3 + ZNE 결합 결과(both_val) 적용
             st.session_state.sim_result.update({
                 "bf_cut": bf_val,
                 "gw_cut": gw_val,
                 "raw_cut": raw_val,
                 "mit_cut": both_val,
-                "m3_cut": m3_val,
-                "zne_cut": zne_val,
-                "both_cut": both_val,
+                # 아래 4개 키가 3번 그래프(기댓값 비교)에 사용됨
+                "qem_raw": raw_exp,
+                "m3_cut": m3_exp,
+                "zne_cut": zne_exp,
+                "both_cut": both_exp,
                 "bf_bs": bf_api.get("bitstring", st.session_state.sim_result.get("bf_bs", "-")),
                 "gw_bs": gw_api.get("bitstring", st.session_state.sim_result.get("gw_bs", "-")),
                 "raw_bs": raw_api.get("bitstring", st.session_state.sim_result.get("raw_bs", "-")),
