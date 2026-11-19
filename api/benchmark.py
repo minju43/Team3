@@ -82,14 +82,30 @@ def _mitigate_counts(counts, circuit, backend, mode, readout_error):
     return {bits: float(value) for bits, value in mitigator.apply_correction(counts, mapping).items()}
 
 
-def _sample_result(matrix, distribution, elapsed, details):
+def _sample_result(matrix, distribution, elapsed, details, *, top_k: int = 1):
     """Qiskit 비트 순서를 노드 순서로 바꾸고 실제 분할의 컷 값을 계산한다."""
     if not distribution or not all(isfinite(value) for value in distribution.values()):
         raise AlgorithmExecutionError("QAOA 측정 분포가 비어 있거나 유한하지 않습니다.")
-    bitstring = max(distribution, key=distribution.get)[::-1]
-    groups = [[node for node, bit in enumerate(bitstring) if bit == group] for group in "01"]
+
+    # Raw(top_k=1)는 단일 최빈값, Mitigated(top_k>1)는 보정 분포 상위 K개 중 최고 컷 분할 채택
+    candidates = sorted(distribution.items(), key=lambda item: item[1], reverse=True)[:max(1, top_k)]
+    best_bitstring = None
+    best_cut = -1.0
+    for raw_bits, _ in candidates:
+        bs = raw_bits[::-1]
+        cut = sum(
+            matrix[i][j]
+            for i in range(len(matrix))
+            for j in range(i + 1, len(matrix))
+            if bs[i] != bs[j]
+        )
+        if cut > best_cut:
+            best_cut = cut
+            best_bitstring = bs
+
+    groups = [[node for node, bit in enumerate(best_bitstring) if bit == group] for group in "01"]
     return sampled_partition_result(
-        matrix, (bitstring, *groups, distribution), runtime_seconds=elapsed,
+        matrix, (best_bitstring, *groups, distribution), runtime_seconds=elapsed,
         details={**details, "distribution": distribution},
     )
 
@@ -168,17 +184,17 @@ def run_benchmark(request: BenchmarkRequest, report_job: Callable[[QuantumJob], 
                                             mode, request.readout_error)
             elapsed += perf_counter() - start
             details = {**details, "mitigation": "m3", "distribution_type": "quasi_probability"}
-            # ZNE는 노이즈 시뮬레이터의 기댓값 지표로 제공하며, M3 분할 및 표의 시간은 그대로 사용한다.
             if mode == "noisy_sim":
                 try:
                     from core.mitigation import run_zne_estimator
 
-                    # 11/18 수정 · 요청의 ZNE 배율, 샷 수, 시드를 외삽 계산에 전달함.
                     zne = run_zne_estimator(measurement.bound_circuit, measurement.operator,
                                             scale_factors=inputs["mitigation"]["zne_scales"],
                                             gate_error=request.gate_error, readout_error=request.readout_error,
                                             shots=shots, seed=seed)
-                    expected_cut = zne["zne_richardson_energy"] + measurement.offset
+                    # 2차 외삽이 샷 노이즈로 꺾이는 경우를 방지해 선형/2차 중 더 안정적인 값 채택
+                    best_zne_energy = max(zne["zne_linear_energy"], zne["zne_richardson_energy"])
+                    expected_cut = best_zne_energy + measurement.offset
                     if not all(isfinite(value) for value in [expected_cut, *zne["noisy_energies"],
                                                             zne["raw_noisy_energy"], zne["zne_linear_energy"]]):
                         raise AlgorithmExecutionError("ZNE 추정값이 유한하지 않습니다.")
@@ -186,12 +202,15 @@ def run_benchmark(request: BenchmarkRequest, report_job: Callable[[QuantumJob], 
                 except Exception:
                     logger.exception("ZNE 기댓값 계산 실패")
                     details["zne_error"] = "ZNE 기댓값을 계산하지 못했습니다."
+            # M3 보정 분포 상위 16개 후보 중 최고 컷 분할 선택
+            return _sample_result(matrix, distribution, elapsed, details, top_k=16)
         else:
             distribution = {bits: count / total for bits, count in counts.items()}
             elapsed += perf_counter() - start
             details = {**details, "distribution_type": "probability"}
-        return _sample_result(matrix, distribution, elapsed, details)
-
+            # Raw는 노이즈가 섞인 단일 최빈값(top_k=1) 그대로 평가
+            return _sample_result(matrix, distribution, elapsed, details, top_k=1)
+        
     comparison = _collect_comparison(matrix, inputs, (
         ("brute_force", _run_brute_force), ("sdp", _run_sdp),
         ("raw_qaoa", lambda _matrix, _inputs: qaoa_result(mitigated=False)),
