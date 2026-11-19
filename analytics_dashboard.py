@@ -191,3 +191,95 @@ if os.path.exists(LOG_FILE):
         </ul>
     </div>
     """, unsafe_allow_html=True)
+    
+# =========================================================
+    # [추가 섹션] 4. 실측 기반 하이퍼파라미터 최적화 분석 (p · 샷 수 · ZNE 배율 간격)
+    # =========================================================
+    st.divider()
+    st.subheader("4. 실측 기반 하이퍼파라미터 최적화: 회로 깊이(p) · 샷 수 · ZNE 배율 간격")
+
+    SWEEP_FILE = "hyperparameter_sweep_logs.csv"
+    if not os.path.exists(SWEEP_FILE):
+        st.info("실측 스윕 데이터(`hyperparameter_sweep_logs.csv`)가 없습니다. 터미널에서 `python run_sweep.py`를 먼저 실행해 주세요.")
+    else:
+        sweep_df = pd.read_csv(SWEEP_FILE)
+
+        # 1) 2048샷 기준: Ideal vs Raw vs ZNE+M3([1,3]) vs ZNE+M3([1,3,5])
+        s2048 = sweep_df[sweep_df["shots"] == 2048]
+        df_ideal = s2048[s2048["backend"] == "ideal"].sort_values("p")
+        df_13 = s2048[(s2048["backend"] == "noisy_sim") & (s2048["zne_scales"] == "[1, 3]")].sort_values("p")
+        df_135 = s2048[(s2048["backend"] == "noisy_sim") & (s2048["zne_scales"] == "[1, 3, 5]")].sort_values("p")
+
+        col_p1, col_p2 = st.columns(2)
+
+        with col_p1:
+            fig_depth = go.Figure()
+            if not df_ideal.empty:
+                fig_depth.add_trace(go.Scatter(
+                    x=df_ideal["p"], y=df_ideal["raw_acc"], mode="lines+markers",
+                    name="Ideal (무잡음 실측)", line=dict(color="#94a3b8", width=3, dash="dash"),
+                    marker=dict(size=9, line=dict(width=1.5, color="#ffffff"))
+                ))
+            if not df_13.empty:
+                fig_depth.add_trace(go.Scatter(
+                    x=df_13["p"], y=df_13["m3_zne_acc"], mode="lines+markers",
+                    name="ZNE+M3 (간격 [1, 3])", line=dict(color="#8b5cf6", width=3),
+                    marker=dict(size=9, line=dict(width=1.5, color="#ffffff"))
+                ))
+                fig_depth.add_trace(go.Scatter(
+                    x=df_13["p"], y=df_13["raw_acc"], mode="lines+markers",
+                    name="Raw (노이즈 무보정)", line=dict(color="#ef4444", width=3),
+                    marker=dict(size=9, line=dict(width=1.5, color="#ffffff"))
+                ))
+                # 실측 최고점 자동 주석
+                best_row = df_13.loc[df_13["m3_zne_acc"].idxmax()]
+                fig_depth.add_annotation(
+                    x=int(best_row["p"]), y=float(best_row["m3_zne_acc"]),
+                    text=f"실측 최적 (p={int(best_row['p'])}, {best_row['m3_zne_acc']:.3f})",
+                    showarrow=True, arrowhead=2, ax=0, ay=-35,
+                    font=dict(color="#34d399", size=12.5),
+                    bgcolor="#132528", bordercolor="#34d399", borderwidth=1
+                )
+            if not df_135.empty:
+                fig_depth.add_trace(go.Scatter(
+                    x=df_135["p"], y=df_135["m3_zne_acc"], mode="lines+markers",
+                    name="ZNE+M3 (간격 [1, 3, 5])", line=dict(color="#3b82f6", width=3, dash="dot"),
+                    marker=dict(size=9, line=dict(width=1.5, color="#ffffff"))
+                ))
+
+            # 좌측 차트 (제목-범례 겹침 해결)
+            fig_depth.update_layout(**layout_update)
+            fig_depth.update_layout(
+                title=dict(text="<b>[2048샷 실측] 회로 깊이(p) 및 ZNE 배율 간격별 근사비</b>", y=0.97, font=dict(size=17, color="#ffffff")),
+                margin=dict(l=40, r=40, t=95, b=40),
+                xaxis=dict(title="회로 깊이 (p)", tickmode="array", tickvals=[1, 2, 3, 4], color="#cbd5e1"),
+                yaxis=dict(title="근사비 (Accuracy)", showgrid=True, gridcolor="#263147", color="#cbd5e1"),
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1.0, font=dict(size=11.5))
+            )
+            st.plotly_chart(fig_depth, use_container_width=True)
+
+        with col_p2:
+            # 2) 히트맵: noisy_sim & [1, 3] 실측 데이터
+            heat_src = sweep_df[(sweep_df["backend"] == "noisy_sim") & (sweep_df["zne_scales"] == "[1, 3]")]
+            pivot_df = heat_src.pivot(index="p", columns="shots", values="m3_zne_acc").sort_index()
+            x_labels = [str(c) for c in pivot_df.columns]
+            y_labels = [f"p = {idx}" for idx in pivot_df.index]
+            z_vals = pivot_df.values
+
+            fig_heat = go.Figure(data=go.Heatmap(
+                z=z_vals, x=x_labels, y=y_labels,
+                colorscale="Viridis",
+                text=[[f"{val:.3f}" if pd.notna(val) else "-" for val in row] for row in z_vals],
+                texttemplate="<b>%{text}</b>",
+                textfont=dict(size=13.5, color="#ffffff"),
+                colorbar=dict(title="근사비", tickfont=dict(color="#cbd5e1"))
+            ))
+            # 우측 히트맵 (5칸 균등 분할 + 제목 색상 선명하게)
+            fig_heat.update_layout(**layout_update)
+            fig_heat.update_layout(
+                title=dict(text="<b>[실측] 샷 수(Shots) × 회로 깊이(p) 최적 조합 히트맵</b>", y=0.97, font=dict(size=17, color="#ffffff")),
+                margin=dict(l=40, r=40, t=75, b=40),
+                xaxis=dict(title="측정 샷 수 (Shots)", type="category", color="#cbd5e1"),
+                yaxis=dict(title="회로 깊이 (p)", type="category", color="#cbd5e1", autorange="reversed")
+            )
+            st.plotly_chart(fig_heat, use_container_width=True)

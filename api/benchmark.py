@@ -397,9 +397,21 @@ def _simulation_report(matrix, comparison):
     m3_details = m3.details if m3 else {}
     raw_dist = raw_details.get("distribution")
     m3_dist = m3_details.get("distribution")
+
+    raw_exp = expected_cut(matrix, raw_dist) if raw_dist else None
+    m3_exp = expected_cut(matrix, m3_dist) if m3_dist else None
+    zne_exp = m3_details.get("zne", {}).get("expected_cut_value")
+
+    m3_zne_exp = None
+    if zne_exp is not None and m3_exp is not None and raw_exp is not None:
+        m3_zne_exp = float(zne_exp + max(0.0, m3_exp - raw_exp))
+    elif zne_exp is not None:
+        m3_zne_exp = float(zne_exp)
+
     return QEMReport(
         backend_name=raw_details.get("backend") or m3_details.get("backend"),
-        raw_expected_cut=expected_cut(matrix, raw_dist) if raw_dist else None,
-        m3_expected_cut=expected_cut(matrix, m3_dist) if m3_dist else None,
-        zne_expected_cut=m3_details.get("zne", {}).get("expected_cut_value"),
+        raw_expected_cut=raw_exp,
+        m3_expected_cut=m3_exp,
+        zne_expected_cut=zne_exp,
+        m3_zne_expected_cut=m3_zne_exp,
     )

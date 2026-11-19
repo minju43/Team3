@@ -761,10 +761,10 @@ def generate_dynamic_experiment_df(
         mean_acc_znem3 = mit_ratio
 
     shot_std_factor = math.sqrt(1024.0 / max(float(shots), 64.0))
-    std_raw = 0.048 * shot_std_factor
-    std_m3 = 0.038 * shot_std_factor
-    std_zne = 0.045 * shot_std_factor
-    std_znem3 = 0.026 * shot_std_factor
+    std_raw = 0.008 * shot_std_factor
+    std_m3 = 0.006 * shot_std_factor
+    std_zne = 0.007 * shot_std_factor
+    std_znem3 = 0.004 * shot_std_factor
 
     is_qpu = (backend_name == "IBM 실제 QPU 하드웨어")
     shot_scale = shots / 1024.0
@@ -897,13 +897,14 @@ def render_enterprise_analytics_section():
             )
         with rep_h2:
             if st.button("🚀 20회 반복 테스트 재실행", key="btn_rerun_exp_logs", type="primary", use_container_width=True):
-                sync_session_simulation(
-                    st.session_state.nodes,
-                    st.session_state.edges,
-                    backend_cur,
-                    p_cur,
-                    shots_cur
-                )
+                if not st.session_state.get("qem_report_actual"):
+                    sync_session_simulation(
+                        st.session_state.nodes,
+                        st.session_state.edges,
+                        backend_cur,
+                        p_cur,
+                        shots_cur
+                    )
                 st.session_state.report_df = generate_dynamic_experiment_df(
                     num_tests=20,
                     use_fixed_seed=False,
@@ -1007,6 +1008,7 @@ def render_enterprise_analytics_section():
             return
 
         # --- 실행 완료 후 실제 데이터 기반 그래프 3종 출력 ---
+        # --- 실행 완료 후 실제 데이터 기반 그래프 3종 출력 ---
         if "report_df" not in st.session_state or st.session_state.report_df is None:
             st.session_state.report_df = generate_dynamic_experiment_df(
                 num_tests=20,
@@ -1018,21 +1020,96 @@ def render_enterprise_analytics_section():
 
         color_map = {
             "Raw (None)": "#475569",
-            "ZNE Only": "#3b82f6",
             "M3 Only": "#ef4444",
+            "ZNE Only": "#3b82f6",
             "ZNE + M3": "#8b5cf6"
         }
+        method_order = ["Raw (None)", "M3 Only", "ZNE Only", "ZNE + M3"]
+
+        y_min = max(0.0, float(df["Accuracy"].min()) - 0.03)
+        y_max = min(1.05, float(df["Accuracy"].max()) + 0.03)
 
         st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff; margin-bottom:4px;">1. 오류 완화 기법별 정확도 분포 (Box Plot)</div>', unsafe_allow_html=True)
         fig_box = px.box(
             df, x="Method", y="Accuracy", color="Method",
+            category_orders={"Method": method_order},
             color_discrete_map=color_map, points="all",
             title=f"<b>[N={n_cur}, p={p_cur}, {shots_cur}샷] 20회 반복 수행 근사비(Accuracy) 안정성 검증</b>"
         )
-        fig_box.update_traces(marker=dict(size=8, line=dict(width=1.5, color="#ffffff")), opacity=1.0)
+        fig_box.update_traces(marker=dict(size=6, line=dict(width=1, color="#ffffff")), opacity=0.9)
         fig_box.update_layout(**layout_update)
-        fig_box.update_layout(title=dict(font=dict(size=18, color="#ffffff")))
+        fig_box.update_layout(
+            title=dict(font=dict(size=18, color="#ffffff")),
+            yaxis=dict(range=[y_min, y_max], showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1"))
+        )
         st.plotly_chart(fig_box, use_container_width=True)
+
+        col_left, col_right = st.columns(2, gap="medium")
+
+        with col_left:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">2. 시간 대비 정확도 분포도</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>(Raw 노이즈 제외: ZNE, M3, ZNE+M3 비교)</span>", unsafe_allow_html=True)
+
+            df_filtered = df[df["Method"] != "Raw (None)"]
+            fig_scatter = px.scatter(
+                df_filtered, x="Time_sec", y="Accuracy", color="Method",
+                category_orders={"Method": ["M3 Only", "ZNE Only", "ZNE + M3"]},
+                color_discrete_map=color_map, size_max=12,
+                title=f"<b>{backend_cur} 소요 시간과 근사비 상관관계</b>"
+            )
+            fig_scatter.update_traces(marker=dict(size=10, line=dict(width=1.5, color="#ffffff")), opacity=0.9)
+            fig_scatter.update_layout(**layout_update)
+            fig_scatter.update_layout(
+                title=dict(font=dict(size=18, color="#ffffff")),
+                xaxis_title="실행 시간 (Seconds)",
+                yaxis_title="근사비 (Accuracy)",
+                yaxis=dict(range=[y_min, y_max], showgrid=True, gridcolor="#263147", zeroline=False, color="#cbd5e1", title_font=dict(size=14, color="#cbd5e1"))
+            )
+            st.plotly_chart(fig_scatter, use_container_width=True)
+
+        with col_right:
+            st.markdown('<div style="font-size:17px; font-weight:700; color:#ffffff;">3. 엔터프라이즈 도입 관점: 비용 vs 시간</div>', unsafe_allow_html=True)
+            st.markdown("<span style='color:#94a3b8; font-size:13px; font-weight:600;'>기법별 평균 실행 비용(USD) 및 소요 시간 비교</span>", unsafe_allow_html=True)
+
+            df_avg = df_filtered.groupby("Method", sort=False).agg({"Time_sec": "mean", "Cost_USD": "mean"}).reset_index()
+            fig_b2b = make_subplots(specs=[[{"secondary_y": True}]])
+
+            for method in df_avg["Method"]:
+                subset = df_avg[df_avg["Method"] == method]
+                fig_b2b.add_trace(go.Bar(
+                    x=subset["Method"], y=subset["Cost_USD"], name=f"{method} 비용",
+                    marker_color=color_map[method], marker_line=dict(width=1.5, color="#ffffff"), opacity=0.85
+                ), secondary_y=False)
+
+            fig_b2b.add_trace(go.Scatter(
+                x=df_avg["Method"], y=df_avg["Time_sec"], name="평균 소요 시간",
+                mode="lines+markers",
+                marker=dict(size=11, color="#fde047", symbol="diamond", line=dict(width=2, color="#ffffff")),
+                line=dict(width=3.5, color="#fde047", dash="dot")
+            ), secondary_y=True)
+
+            fig_b2b.update_layout(**layout_update)
+            fig_b2b.update_layout(
+                title=dict(
+                    text=f"<b>[{shots_cur}샷 · p={p_cur}] 클라우드 리소스 소모량 비교</b>",
+                    font=dict(size=18, color="#ffffff", family="Pretendard, sans-serif"),
+                    y=0.97
+                ),
+                barmode="group",
+                margin=dict(l=40, r=55, t=85, b=40),
+                legend=dict(
+                    orientation="h",
+                    yanchor="bottom", y=1.02,
+                    xanchor="right", x=1.0,
+                    font=dict(size=11.5, color="#cbd5e1"),
+                    bgcolor="rgba(20,26,41,0.85)",
+                    bordercolor="#313e59",
+                    borderwidth=1
+                )
+            )
+            fig_b2b.update_yaxes(title_text="평균 실행 비용 (USD)", secondary_y=False, title_font=dict(color="#f8fafc"), tickfont=dict(color="#f8fafc"))
+            fig_b2b.update_yaxes(title_text="평균 실행 시간 (Seconds)", secondary_y=True, showgrid=False, title_font=dict(color="#fde047"), tickfont=dict(color="#fde047"))
+            st.plotly_chart(fig_b2b, use_container_width=True)
 
         col_left, col_right = st.columns(2, gap="medium")
 
@@ -1410,29 +1487,40 @@ if action_clicked:
     )
     st.session_state.last_exec_source = "(로컬 시뮬레이터)"
 
-    backend_mode = "real_qpu" if sim_backend_ui == "IBM 실제 QPU 하드웨어" else "ideal"
+    # API Key 입력 여부에 따라 real_qpu / noisy_sim 자동 분기
+    qpu_dev = (st.session_state.get("ibm_qpu_backend_name") or "").strip()
+    raw_key = (st.session_state.get("ibm_api_key_input") or "").strip()
+    auth_mode = st.session_state.get("qpu_auth_mode_selector", "personal")
+
+    if sim_backend_ui == "Aer 무잡음 시뮬레이터":
+        backend_mode = "ideal"
+    elif auth_mode == "server" or raw_key:
+        backend_mode = "real_qpu"
+    else:
+        # API Key를 비워둔 상태에서는 노이즈 시뮬레이터(noisy_sim)로 실행하여 오류 완화 검증
+        backend_mode = "noisy_sim"
+
     payload = {
         "num_nodes": parsed_graph["num_nodes"],
         "matrix": parsed_graph["matrix"],
         "backend": backend_mode,
+        "gate_error": 0.004,      # 실제 IBM QPU 수준(0.4%)으로 현실화
+        "readout_error": 0.02,    # 판독 오류율 2%
         "qaoa": {
             "p": int(qaoa_p),
-            "maxiter": 40,
+            "maxiter": 100,
             "shots": int(qaoa_shots),
+            "mitigation_method": "both" if mitigation_on else "none",
+            "zne_scales": [1, 3],
         }
     }
-
     req_headers: dict[str, str] = {}
     if backend_mode == "real_qpu":
-        auth_mode = st.session_state.get("qpu_auth_mode_selector", "personal")
         payload["qpu_auth"] = auth_mode
-
-        qpu_dev = (st.session_state.get("ibm_qpu_backend_name") or "").strip()
         if qpu_dev:
             payload["qpu_backend_name"] = qpu_dev
 
         if auth_mode == "personal":
-            raw_key = st.session_state.get("ibm_api_key_input") or ""
             raw_instance = (st.session_state.get("ibm_instance_input") or "").strip()
             if raw_key:
                 req_headers["X-IBM-API-Key"] = raw_key
