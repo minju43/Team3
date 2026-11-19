@@ -17,7 +17,7 @@ class JobAPIError(Exception):
 def _request(method: str, path: str, **kwargs) -> requests.Response:
     base_url = os.getenv("QPARTYCUT_API_URL", "http://127.0.0.1:8000").rstrip("/")
     try:
-        response = requests.request(method, f"{base_url}{path}", timeout=(3, 5), **kwargs)
+        response = requests.request(method, f"{base_url}{path}", timeout=(3, 10), **kwargs)
     except requests.RequestException as exc:
         raise JobAPIError("백엔드에 연결할 수 없습니다.") from exc
 
@@ -34,8 +34,10 @@ def _request(method: str, path: str, **kwargs) -> requests.Response:
         )
     if not isinstance(detail, str):
         detail = None
-    raise JobAPIError(detail or f"백엔드 요청이 실패했습니다 (HTTP {response.status_code}).",
-                      status_code=response.status_code)
+    raise JobAPIError(
+        detail or f"백엔드 요청이 실패했습니다 (HTTP {response.status_code}).",
+        status_code=response.status_code,
+    )
 
 
 def _read_job(response: requests.Response) -> tuple[JobResponse, int]:

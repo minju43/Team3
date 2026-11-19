@@ -1108,6 +1108,9 @@ if "show_quant_report" not in st.session_state:
 if "api_error_msg" not in st.session_state:
     st.session_state.api_error_msg = None
 
+if "active_qpu_device" not in st.session_state:
+    st.session_state.active_qpu_device = ""
+
 if "last_exec_source" not in st.session_state:
     st.session_state.last_exec_source = ""
 
@@ -1167,7 +1170,11 @@ with top_c3:
     action_clicked = st.button("▶ 갈등 해결 실행", type="primary", use_container_width=True)
 
 with top_c4:
-    qpu_display_name = (st.session_state.get("ibm_qpu_backend_name") or "").strip() or "ibm_sherbrooke (127Q)"
+    qpu_display_name = (
+        st.session_state.get("active_qpu_device")
+        or (st.session_state.get("ibm_qpu_backend_name") or "").strip()
+        or "ibm_sherbrooke (127Q)"
+    )
     st.markdown(
         f'<div class="status-pill">'
         f'<span class="status-dot">●</span> <b>IBM Quantum</b>'
@@ -1177,7 +1184,7 @@ with top_c4:
     )
 
 if st.session_state.get("api_error_msg"):
-    st.error(f"⚠️ 백엔드 실행 오류: {st.session_state.api_error_msg}")
+    st.error(f"⚠️ 백엔드 검증/실행 오류: {st.session_state.api_error_msg}")
 
 st.markdown("<div style='height: 6px;'></div>", unsafe_allow_html=True)
 
@@ -1289,7 +1296,8 @@ with left_col:
         if is_qpu:
             st.markdown(
                 '<div style="background-color:#0f172a; border:1px solid #334155; border-radius:10px; padding:10px 12px; margin-top:10px;">'
-                '<div style="font-size:12.5px; font-weight:700; color:#a5b4fc; margin-bottom:6px;">🔐 IBM Quantum 자격증명 (Real QPU)</div>'
+                '<div style="font-size:12.5px; font-weight:700; color:#a5b4fc; margin-bottom:2px;">🔐 IBM Quantum 자격증명 (Real QPU)</div>'
+                '<div style="font-size:11.5px; color:#94a3b8;">입력한 API Key는 요청 헤더(X-IBM-API-Key)로 백엔드에 전달됩니다.</div>'
                 '</div>',
                 unsafe_allow_html=True
             )
@@ -1383,7 +1391,7 @@ with right_col:
             )
 
 # ==========================================
-# 헤더 '갈등 해결 실행' 액션 처리 (백엔드 API + 개인 IBM API Key 연동)
+# 헤더 '갈등 해결 실행' 액션 처리 (백엔드 API + 개인 IBM API Key 검증 연동)
 # ==========================================
 canvas_dict = {
     "nodes": [{"id": n} for n in st.session_state.nodes],
@@ -1415,8 +1423,6 @@ if action_clicked:
     }
 
     req_headers: dict[str, str] = {}
-    validation_failed = False
-
     if backend_mode == "real_qpu":
         auth_mode = st.session_state.get("qpu_auth_mode_selector", "personal")
         payload["qpu_auth"] = auth_mode
@@ -1426,21 +1432,18 @@ if action_clicked:
             payload["qpu_backend_name"] = qpu_dev
 
         if auth_mode == "personal":
-            raw_key = (st.session_state.get("ibm_api_key_input") or "").strip()
+            raw_key = st.session_state.get("ibm_api_key_input") or ""
             raw_instance = (st.session_state.get("ibm_instance_input") or "").strip()
-            if not raw_key:
-                st.session_state.api_error_msg = "IBM 실제 QPU 하드웨어(개인 키) 실행을 위해 IBM Quantum API Key를 입력해 주세요."
-                validation_failed = True
-            else:
+            if raw_key:
                 req_headers["X-IBM-API-Key"] = raw_key
-                if raw_instance:
-                    req_headers["X-IBM-Instance"] = raw_instance
+            if raw_instance:
+                req_headers["X-IBM-Instance"] = raw_instance
 
-    if not validation_failed and HAS_JOB_CLIENT:
+    if HAS_JOB_CLIENT:
         try:
-            with st.spinner("양자 연산 백엔드 작업 제출 및 실행 중..."):
+            with st.spinner("양자 연산 백엔드 작업 제출 및 검증 중..."):
                 job, wait_sec = submit_job(payload, headers=req_headers if req_headers else None)
-                max_polls = 45 if backend_mode == "real_qpu" else 20
+                max_polls = 60 if backend_mode == "real_qpu" else 20
                 for _ in range(max_polls):
                     if job.status in ("completed", "failed"):
                         break
@@ -1452,36 +1455,45 @@ if action_clicked:
                 st.session_state.api_error_msg = err_msg
             elif job.status == "completed" and job.result is not None:
                 res = job.result
-                res_map = res.results
+                bm_by_key = {row.key: row for row in res.benchmarks}
 
-                bf_run = res_map.get("brute_force")
-                sdp_run = res_map.get("sdp")
-                raw_run = res_map.get("raw_qaoa")
-                mit_run = res_map.get("mitigated_qaoa")
+                bf_row = bm_by_key.get("brute_force")
+                sdp_row = bm_by_key.get("sdp")
+                raw_row = bm_by_key.get("raw_qaoa")
+                mit_row = bm_by_key.get("mitigated_qaoa")
 
-                bf_val = float(bf_run.result.max_cut_value) if (bf_run and bf_run.result) else st.session_state.bf_cut
+                # QPU 실행 중 개별 알고리즘 에러가 발생한 경우 사용자에게 안내
+                qpu_row_errors = [
+                    f"{row.algorithm}: {row.error_message}"
+                    for row in res.benchmarks
+                    if row.status == "error" and row.error_message
+                ]
+                if qpu_row_errors and backend_mode == "real_qpu":
+                    st.session_state.api_error_msg = " / ".join(qpu_row_errors)
+
+                bf_val = float(bf_row.max_cut_value) if (bf_row and bf_row.max_cut_value is not None) else st.session_state.bf_cut
                 bf_val = max(bf_val, 0.1)
-                gw_val = float(sdp_run.result.max_cut_value) if (sdp_run and sdp_run.result) else st.session_state.benchmarks[1]["max_cut_value"]
-                raw_val = float(raw_run.result.max_cut_value) if (raw_run and raw_run.result) else st.session_state.raw_cut
-                mit_val = float(mit_run.result.max_cut_value) if (mit_run and mit_run.result) else st.session_state.mit_cut
+                gw_val = float(sdp_row.max_cut_value) if (sdp_row and sdp_row.max_cut_value is not None) else st.session_state.benchmarks[1]["max_cut_value"]
+                raw_val = float(raw_row.max_cut_value) if (raw_row and raw_row.max_cut_value is not None) else st.session_state.raw_cut
+                mit_val = float(mit_row.max_cut_value) if (mit_row and mit_row.max_cut_value is not None) else st.session_state.mit_cut
 
-                if mit_run and mit_run.result and mit_run.result.bitstring:
-                    st.session_state.bitstring = mit_run.result.bitstring
-                if raw_run and raw_run.result and raw_run.result.bitstring:
-                    st.session_state.raw_bitstring = raw_run.result.bitstring
+                if mit_row and mit_row.bitstring:
+                    st.session_state.bitstring = mit_row.bitstring
+                if raw_row and raw_row.bitstring:
+                    st.session_state.raw_bitstring = raw_row.bitstring
 
-                t_bf_str = f"{bf_run.time:.3f}s" if (bf_run and bf_run.time is not None) else st.session_state.sim_result.get("t_bf", "-")
-                t_gw_str = f"{sdp_run.time:.3f}s" if (sdp_run and sdp_run.time is not None) else st.session_state.sim_result.get("t_gw", "-")
-                t_raw_str = f"{raw_run.time:.2f}s" if (raw_run and raw_run.time is not None) else st.session_state.sim_result.get("t_raw", "-")
-                t_mit_str = f"{mit_run.time:.2f}s" if (mit_run and mit_run.time is not None) else st.session_state.sim_result.get("t_mit", "-")
+                t_bf_str = f"{bf_row.time:.3f}s" if (bf_row and bf_row.time is not None) else st.session_state.sim_result.get("t_bf", "-")
+                t_gw_str = f"{sdp_row.time:.3f}s" if (sdp_row and sdp_row.time is not None) else st.session_state.sim_result.get("t_gw", "-")
+                t_raw_str = f"{raw_row.time:.2f}s" if (raw_row and raw_row.time is not None) else st.session_state.sim_result.get("t_raw", "-")
+                t_mit_str = f"{mit_row.time:.2f}s" if (mit_row and mit_row.time is not None) else st.session_state.sim_result.get("t_mit", "-")
 
                 api_sim = {
                     "bf_cut": bf_val,
                     "gw_cut": gw_val,
                     "raw_cut": raw_val,
                     "mit_cut": mit_val,
-                    "raw_sec": float(raw_run.time) if (raw_run and raw_run.time is not None) else st.session_state.sim_result.get("raw_sec", 0.5),
-                    "mit_sec": float(mit_run.time) if (mit_run and mit_run.time is not None) else st.session_state.sim_result.get("mit_sec", 0.8),
+                    "raw_sec": float(raw_row.time) if (raw_row and raw_row.time is not None) else st.session_state.sim_result.get("raw_sec", 0.5),
+                    "mit_sec": float(mit_row.time) if (mit_row and mit_row.time is not None) else st.session_state.sim_result.get("mit_sec", 0.8),
                     "t_bf": t_bf_str,
                     "t_gw": t_gw_str,
                     "t_raw": t_raw_str,
@@ -1493,6 +1505,11 @@ if action_clicked:
                 st.session_state.mit_cut = mit_val
                 st.session_state.benchmarks = build_benchmark_tables_from_sim(api_sim)
 
+                if job.quantum_job and job.quantum_job.backend_name:
+                    st.session_state.active_qpu_device = job.quantum_job.backend_name
+                elif res.qem and res.qem.backend_name:
+                    st.session_state.active_qpu_device = res.qem.backend_name
+
                 if res.qem is not None:
                     st.session_state.qem_report_actual = res.qem.model_dump()
 
@@ -1502,17 +1519,18 @@ if action_clicked:
                     show_progress=False
                 )
                 st.session_state.last_exec_source = "(FastAPI 백엔드)"
-                st.session_state.has_solved = True
-                st.session_state.view_after = True
+                if not st.session_state.api_error_msg:
+                    st.session_state.has_solved = True
+                    st.session_state.view_after = True
         except JobAPIError as exc:
             if exc.status_code is None and backend_mode != "real_qpu":
                 st.session_state.has_solved = True
                 st.session_state.view_after = True
             else:
                 st.session_state.api_error_msg = str(exc)
-    elif not validation_failed and backend_mode == "real_qpu":
+    elif backend_mode == "real_qpu":
         st.session_state.api_error_msg = f"백엔드 클라이언트 로드 실패: {JOB_CLIENT_IMPORT_ERR}"
-    elif not validation_failed:
+    else:
         st.session_state.has_solved = True
         st.session_state.view_after = True
 
